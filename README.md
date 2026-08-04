@@ -63,3 +63,4 @@
 - **空间不足**：见上面的"刷机须知"，删减插件。
 - **ngrokc / frpc 编译失败**：本配置基于 immortalwrt，luci-app-ngrokc、ngrokc、luci-app-frpc 均为官方 feeds 自带，无需第三方源；如报错请确认 immortalwrt 对应分支（openwrt-23.05）下这些包仍然存在。
 - **ssr-plus 编译失败**：确认 `fw876/helloworld` 源可访问（diy-part1.sh 已添加）；它提供 luci-app-ssr-plus 及 xray/v2ray 等底层依赖。
+- **libustream 冲突（`check_data_file_clashes: Package libustream-openssl wants to install .../libustream-ssl.so But that file is already provided by libustream-mbedtls`）**：immortalwrt 23.05 的 `include/target.mk` 默认包里自带 **openssl 版** `libustream-openssl`，而 `luci-ssl`（mbedtls 版）会硬拉 `libustream-mbedtls`，两者提供同名 `libustream-ssl.so` 故冲突。本仓库已统一改用 **`luci-ssl-openssl`**（openssl 版）+ 显式 `CONFIG_PACKAGE_libustream-mbedtls=n` 规避。若你手动加机型 config，请勿混用 `luci-ssl` 与默认的 openssl 后端。
