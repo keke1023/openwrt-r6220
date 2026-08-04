@@ -1,0 +1,119 @@
+name: Build OpenWrt for Netgear R6220
+
+on:
+  workflow_dispatch:        # 手动在 Actions 页面点 "Run workflow" 触发
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build.yml'
+      - 'config/**'
+      - 'scripts/**'
+#  schedule:
+#    - cron: 0 20 * * 5      # 每周五 20:00 UTC 自动编译一次（可删掉这段改为纯手动）
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt   # 主源码：immortalwrt（自带 luci-app-ngrokc / ngrokc / luci-app-frpc）
+  REPO_BRANCH: openwrt-23.05
+  CONFIG_FILE: config/r6220.config
+  DIY_P1_SH: scripts/diy-part1.sh     # 更新 feeds 之前执行：添加第三方源
+  DIY_P2_SH: scripts/diy-part2.sh     # 编译之前执行：改默认管理 IP 等
+  UPLOAD_RELEASE: 'true'              # 传到 Release（保存更久，推荐）
+  UPLOAD_ARTIFACT: 'false'           # 是否额外传 Artifacts
+  TZ: Asia/Shanghai
+
+permissions:
+  contents: write        # 允许上传 Release
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 检出本仓库
+        uses: actions/checkout@v4
+
+      - name: 清理磁盘空间（避免 runner 空间不足）
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -hT $PWD
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils \
+            bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex \
+            gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool \
+            libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+            libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev \
+            libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf qemu-utils \
+            rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim \
+            wget xmlto xxd zlib1g-dev
+
+      - name: 克隆源码
+        run: |
+          git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+
+      - name: 执行 DIY-P1（添加自定义源）
+        run: |
+          cd openwrt
+          chmod +x ../$DIY_P1_SH
+          bash ../$DIY_P1_SH
+
+      - name: 更新并安装 feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 执行 DIY-P2（修改默认设置）
+        run: |
+          cd openwrt
+          chmod +x ../$DIY_P2_SH
+          bash ../$DIY_P2_SH
+
+      - name: 加载 .config 并生成默认配置
+        run: |
+          cd openwrt
+          cp ../$CONFIG_FILE .config
+          make defconfig
+
+      - name: 下载依赖源码包（先下完再编译，降低超时风险）
+        run: |
+          cd openwrt
+          make download -j8
+          find dl -size -1024c -exec ls -l {} \;
+
+      - name: 编译固件
+        id: compile
+        run: |
+          cd openwrt
+          echo -e "$(nproc) thread compile"
+          make -j$(nproc) || make -j1 || make -j1 V=s
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: 整理固件文件
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          cd openwrt/bin/targets/*/*
+          rm -rf packages
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+
+      - name: 生成发布标签
+        id: tag
+        if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+        run: echo "release_tag=R6220-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+
+      - name: 上传到 Release
+        uses: softprops/action-gh-release@v2
+        if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          files: ${{ env.FIRMWARE }}/*
+
+      - name: 上传 Artifact（可选）
+        uses: actions/upload-artifact@v4
+        if: env.UPLOAD_ARTIFACT == 'true' && steps.compile.outputs.status == 'success'
+        with:
+          name: OpenWrt-R6220
+          path: ${{ env.FIRMWARE }}/*

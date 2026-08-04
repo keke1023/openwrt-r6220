@@ -1,0 +1,12 @@
+# OpenWrt build artifacts (never commit these)
+/bin/
+/build_dir/
+/dl/
+/feeds/
+/tmp/
+/staging_dir/
+/toolchain/
+.config.old
+*.bin
+*.img
+*.trx
