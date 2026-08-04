@@ -1,32 +1,47 @@
-name: Build OpenWrt for Netgear R6220
+name: Build OpenWrt (Multi-device)
 
 on:
   workflow_dispatch:        # 手动在 Actions 页面点 "Run workflow" 触发
-  push:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/build.yml'
-      - 'config/**'
-      - 'scripts/**'
 #  schedule:
-#    - cron: 0 20 * * 5      # 每周五 20:00 UTC 自动编译一次（可删掉这段改为纯手动）
-
-env:
-  REPO_URL: https://github.com/immortalwrt/immortalwrt   # 主源码：immortalwrt（自带 luci-app-ngrokc / ngrokc / luci-app-frpc）
-  REPO_BRANCH: openwrt-23.05
-  CONFIG_FILE: config/r6220.config
-  DIY_P1_SH: scripts/diy-part1.sh     # 更新 feeds 之前执行：添加第三方源
-  DIY_P2_SH: scripts/diy-part2.sh     # 编译之前执行：改默认管理 IP 等
-  UPLOAD_RELEASE: 'true'              # 传到 Release（保存更久，推荐）
-  UPLOAD_ARTIFACT: 'false'           # 是否额外传 Artifacts
-  TZ: Asia/Shanghai
+#    - cron: 0 20 * * 5      # 每周五 20:00 UTC 自动编译（取消注释即启用）
 
 permissions:
   contents: write        # 允许上传 Release
 
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt   # 主源码：immortalwrt（自带 luci-app-ngrokc / ngrokc / luci-app-frpc）
+  REPO_BRANCH: openwrt-23.05
+  DIY_P1_SH: scripts/diy-part1.sh     # 更新 feeds 之前执行：添加第三方源
+  DIY_P2_SH: scripts/diy-part2.sh     # 编译之前执行：改默认管理 IP 等
+  TZ: Asia/Shanghai
+
+# ---------------------------------------------------------------------------
+# prepare：扫描 config/ 下所有 *.config，生成机型矩阵
+# 新增机型 = 往 config/ 丢一个 xxx.config，无需改动本文件
+# ---------------------------------------------------------------------------
 jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: gen
+        run: |
+          echo "扫描 config/ 下的机型配置："
+          ls -1 config/*.config
+          json=$(ls -1 config/*.config | xargs -n1 basename | jq -R -s -c 'split("\n") | map(select(length>0))')
+          echo "matrix=$json" >> "$GITHUB_OUTPUT"
+          echo "本次编译机型：$json"
+
   build:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.matrix != '[]' }}
+    strategy:
+      fail-fast: false          # 一个机型失败不影响其他机型继续
+      matrix:
+        config: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    name: Build ${{ matrix.config }}
     runs-on: ubuntu-22.04
     steps:
       - name: 检出本仓库
@@ -51,8 +66,7 @@ jobs:
             wget xmlto xxd zlib1g-dev
 
       - name: 克隆源码
-        run: |
-          git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        run: git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
 
       - name: 执行 DIY-P1（添加自定义源）
         run: |
@@ -72,10 +86,10 @@ jobs:
           chmod +x ../$DIY_P2_SH
           bash ../$DIY_P2_SH
 
-      - name: 加载 .config 并生成默认配置
+      - name: 加载 ${{ matrix.config }} 并生成默认配置
         run: |
           cd openwrt
-          cp ../$CONFIG_FILE .config
+          cp ../config/${{ matrix.config }} .config
           make defconfig
 
       - name: 下载依赖源码包（先下完再编译，降低超时风险）
@@ -99,21 +113,24 @@ jobs:
           rm -rf packages
           echo "FIRMWARE=$PWD" >> $GITHUB_ENV
 
-      - name: 生成发布标签
+      - name: 生成发布标签（按机型名区分）
         id: tag
-        if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
-        run: echo "release_tag=R6220-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          device=$(echo "${{ matrix.config }}" | sed 's/\.config$//')
+          echo "release_tag=${device}-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
 
       - name: 上传到 Release
         uses: softprops/action-gh-release@v2
-        if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+        if: steps.compile.outputs.status == 'success'
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           files: ${{ env.FIRMWARE }}/*
 
-      - name: 上传 Artifact（可选）
+      - name: 上传 Artifact（编译失败时也可拿到半成品排查）
+        if: always()
         uses: actions/upload-artifact@v4
-        if: env.UPLOAD_ARTIFACT == 'true' && steps.compile.outputs.status == 'success'
         with:
-          name: OpenWrt-R6220
-          path: ${{ env.FIRMWARE }}/*
+          name: OpenWrt-${{ matrix.config }}
+          path: openwrt/bin/targets/**/*
+          retention-days: 7
