@@ -79,6 +79,16 @@ jobs:
         run: git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
 
       # ---------------------------------------------------------------------
+      # 删除过时的 ipq40xx 内核补丁 401（避免打补丁阶段失败）
+      # 该补丁意图注释掉 sdhci-msm 的自定义时钟函数、改用通用 sdhci_set_clock，
+      # 但其上下文基于旧版内核，与当前 5.15.198 的 sdhci-msm.c 对不上（Hunk FAILED），
+      # 且 5.15.198 中 .set_clock 仍引用 sdhci_msm_set_clock（非死代码），
+      # 因此直接删除该补丁，保留内核原生时钟处理函数即可正常编译。
+      # 仅 ipq40xx 存在此文件，rm -f 对其它架构为无操作。
+      - name: 移除过时的 ipq40xx 内核补丁 401
+        run: rm -f openwrt/target/linux/ipq40xx/patches-5.15/401-mmc-sdhci-msm-comment-unused-sdhci_msm_set_clock.patch
+
+      # ---------------------------------------------------------------------
       # 缓存 1：dl 源码包（所有机型/架构共享，架构无关，最大提速收益）
       # 固定 key 让跨运行、跨机型都能复用；并发写入由 GitHub 自动处理（后者 skip）
       # ---------------------------------------------------------------------
