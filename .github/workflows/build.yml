@@ -48,6 +48,10 @@ jobs:
       fail-fast: false          # 一个机型失败不影响其他机型继续
       matrix:
         include: ${{ fromJson(needs.prepare.outputs.matrix) }}
+        # 临时跳过某个架构：取消下一行注释即可（mt7621 机型在本仓库 arch=ramips）。
+        # 想恢复编译，把这段 exclude 注释掉即可，无需改动扫描逻辑。
+        exclude:
+          - arch: ramips        # 跳过全部 mt7621 机型（R6220 / Newifi3 / JDCloud RE-SP-01B / CR6606）
     name: Build ${{ matrix.config }}
     runs-on: ubuntu-22.04
     env:
