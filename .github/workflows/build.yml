@@ -2,6 +2,8 @@ name: Build OpenWrt (Multi-device)
 
 on:
   workflow_dispatch:        # 手动在 Actions 页面点 "Run workflow" 触发
+  push:
+    branches: [master]      # push 到 master 自动触发编译
 #  schedule:
 #    - cron: 0 20 * * 5      # 每周五 20:00 UTC 自动编译（取消注释即启用）
 
