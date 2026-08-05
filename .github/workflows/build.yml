@@ -37,6 +37,8 @@ jobs:
           for f in config/*.config; do
             b=$(basename "$f")
             arch=$(grep -oE 'CONFIG_TARGET_(ramips|mediatek|ipq40xx|ath79|rockchip|bcm27xx|ipq806x|sunxi)=y' "$f" | head -1 | sed -E 's/CONFIG_TARGET_([a-z0-9]+)=y/\1/')
+            # 临时跳过 ramips(mt7621) 机型：删除/注释下一行即可恢复 mt7621 编译
+            [ "$arch" = "ramips" ] && continue
             items+=("{\"config\":\"$b\",\"arch\":\"${arch:-unknown}\"}")
           done
           json=$(printf '%s\n' "${items[@]}" | jq -s -c '.')
@@ -45,10 +47,11 @@ jobs:
 
   build:
     needs: prepare
-    # 跳过 ramips(mt7621) 架构：本仓库 mt7621 机型 arch=ramips。
-    # 注意：矩阵由动态 include 生成时 GitHub 的 matrix.exclude 不生效，故改用 job 级 if 守卫。
-    # 想恢复编译，去掉 "&& matrix.arch != 'ramips'" 即可，无需改动扫描逻辑。
-    if: ${{ needs.prepare.outputs.matrix != '[]' && matrix.arch != 'ramips' }}
+    if: ${{ needs.prepare.outputs.matrix != '[]' }}
+    # 跳过 ramips(mt7621) 架构：在下方 prepare 扫描阶段直接不生成 ramips 机型矩阵项，
+    # 本 job 因此不会为 ramips 创建（比 matrix.exclude / job 级 if(matrix.*) 都可靠——
+    # 动态 include 矩阵下 exclude 不生效；job 级 if 也不能引用 matrix 上下文）。
+    # 想恢复 mt7621 编译：删除 prepare 循环里的 `[ "$arch" = "ramips" ] && continue` 一行即可。
     strategy:
       fail-fast: false          # 一个机型失败不影响其他机型继续
       matrix:
