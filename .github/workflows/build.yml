@@ -37,7 +37,9 @@ jobs:
           for f in config/*.config; do
             b=$(basename "$f")
             arch=$(grep -oE 'CONFIG_TARGET_(ramips|mediatek|ipq40xx|ath79|rockchip|bcm27xx|ipq806x|sunxi)=y' "$f" | head -1 | sed -E 's/CONFIG_TARGET_([a-z0-9]+)=y/\1/')
-            # 临时跳过 ramips(mt7621) 机型：删除/注释下一行即可恢复 mt7621 编译
+            # 临时：本次仅编译 r619ac（删除下一行即可恢复编译全部机型）
+            [ "$b" != "r619ac.config" ] && continue
+            # 临时跳过 ramips(mt7621) 机型：删除/注释下一行即可恢复 mt7621 编译（仅编全部时生效）
             [ "$arch" = "ramips" ] && continue
             items+=("{\"config\":\"$b\",\"arch\":\"${arch:-unknown}\"}")
           done
