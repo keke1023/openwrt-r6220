@@ -2,8 +2,8 @@ name: Build OpenWrt (Multi-device)
 
 on:
   workflow_dispatch:        # 手动在 Actions 页面点 "Run workflow" 触发
-  push:
-    branches: [master]      # push 到 master 自动触发编译
+#  push:
+#    branches: [master]      # 如需 push 自动触发编译，取消注释这两行即可
 #  schedule:
 #    - cron: 0 20 * * 5      # 每周五 20:00 UTC 自动编译（取消注释即启用）
 
@@ -37,9 +37,7 @@ jobs:
           for f in config/*.config; do
             b=$(basename "$f")
             arch=$(grep -oE 'CONFIG_TARGET_(ramips|mediatek|ipq40xx|ath79|rockchip|bcm27xx|ipq806x|sunxi)=y' "$f" | head -1 | sed -E 's/CONFIG_TARGET_([a-z0-9]+)=y/\1/')
-            # 临时：本次仅编译 r619ac（删除下一行即可恢复编译全部机型）
-            [ "$b" != "r619ac.config" ] && continue
-            # 临时跳过 ramips(mt7621) 机型：删除/注释下一行即可恢复 mt7621 编译（仅编全部时生效）
+            # 临时跳过 ramips(mt7621) 机型：删除/注释下一行即可恢复 mt7621 编译
             [ "$arch" = "ramips" ] && continue
             items+=("{\"config\":\"$b\",\"arch\":\"${arch:-unknown}\"}")
           done
