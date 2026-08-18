@@ -46,7 +46,7 @@ jobs:
             name=${b%.config}
             arch=$(grep -oE 'CONFIG_TARGET_(ramips|mediatek|ipq40xx|ath79|rockchip|bcm27xx|ipq806x|sunxi)=y' "$f" | head -1 | sed -E 's/CONFIG_TARGET_([a-z0-9]+)=y/\1/')
             # 临时跳过 ramips(mt7621) 机型：删除/注释下一行即可恢复 mt7621 编译
-            [ "$arch" = "ramips" ] && continue
+            # [ "$arch" = "ramips" ] && continue
             # 若指定了 targets，仅保留基名包含任一关键字的机型
             if [ -n "$TARGETS" ]; then
               hit=0
