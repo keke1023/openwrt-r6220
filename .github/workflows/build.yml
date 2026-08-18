@@ -2,6 +2,11 @@ name: Build OpenWrt (Multi-device)
 
 on:
   workflow_dispatch:        # 手动在 Actions 页面点 "Run workflow" 触发
+    inputs:
+      targets:
+        description: '只编译指定机型：逗号分隔的 config 基名，模糊匹配。留空=编译全部(仍跳过ramips)。示例：dw33d,rax3000m'
+        required: false
+        default: ''
 #  push:
 #    branches: [master]      # 如需 push 自动触发编译，取消注释这两行即可
 #  schedule:
@@ -34,11 +39,25 @@ jobs:
           echo "扫描 config/ 下的机型配置："
           ls -1 config/*.config
           items=()
+          # 本次要编译的机型关键字（逗号分隔，模糊匹配）；留空=全部(仍跳过 ramips)
+          TARGETS="${{ github.event.inputs.targets }}"
           for f in config/*.config; do
             b=$(basename "$f")
+            name=${b%.config}
             arch=$(grep -oE 'CONFIG_TARGET_(ramips|mediatek|ipq40xx|ath79|rockchip|bcm27xx|ipq806x|sunxi)=y' "$f" | head -1 | sed -E 's/CONFIG_TARGET_([a-z0-9]+)=y/\1/')
             # 临时跳过 ramips(mt7621) 机型：删除/注释下一行即可恢复 mt7621 编译
             [ "$arch" = "ramips" ] && continue
+            # 若指定了 targets，仅保留基名包含任一关键字的机型
+            if [ -n "$TARGETS" ]; then
+              hit=0
+              IFS=',' read -ra KW <<< "$TARGETS"
+              for kw in "${KW[@]}"; do
+                kw=$(echo "$kw" | tr -d '[:space:]')
+                [ -z "$kw" ] && continue
+                if echo "$name" | grep -qiF -- "$kw"; then hit=1; break; fi
+              done
+              [ "$hit" -eq 0 ] && continue
+            fi
             items+=("{\"config\":\"$b\",\"arch\":\"${arch:-unknown}\"}")
           done
           json=$(printf '%s\n' "${items[@]}" | jq -s -c '.')
