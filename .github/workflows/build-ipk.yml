@@ -47,6 +47,10 @@ jobs:
       CCACHE_DIR: ${{ github.workspace }}/openwrt/staging_dir/cache
       CCACHE_MAXSIZE: 5G
     steps:
+      - name: 初始化（生成安全的目标标识，避免 key/名称里出现斜杠）
+        id: env
+        run: echo "target_key=$(echo '${{ inputs.target }}' | tr '/' '-')" >> $GITHUB_OUTPUT
+
       - name: 清理磁盘空间（避免 runner 空间不足）
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
@@ -97,16 +101,22 @@ jobs:
         uses: actions/cache@v4
         with:
           path: openwrt/staging_dir/cache
-          key: openwrt-ipk-ccache-${{ inputs.target }}
+          key: openwrt-ipk-ccache-${{ steps.env.outputs.target_key }}
           restore-keys: |
-            openwrt-ipk-ccache-${{ inputs.target }}
+            openwrt-ipk-ccache-${{ steps.env.outputs.target_key }}
 
       - name: 生成最小配置（仅选目标架构 + 目标包）
         run: |
           cd openwrt
-          TARGET_SYM="CONFIG_TARGET_$(echo '${{ inputs.target }}' | tr '/' '_')=y"
+          # 必须同时写父级 target 与 subtarget 两行符号！
+          # 只写 CONFIG_TARGET_xxx_yyy=y（缺 CONFIG_TARGET_xxx=y）时，kconfig 会因
+          # 依赖不满足丢弃该符号，defconfig 回退到默认 x86/64（已实际踩坑：
+          # 全程跑成 staging_dir/target-x86_64_musl 导致产物架构错误）。
+          PARENT=$(echo '${{ inputs.target }}' | cut -d/ -f1)
+          SUB=$(echo '${{ inputs.target }}' | cut -d/ -f2)
           cat > .config <<EOF
-          ${TARGET_SYM}
+          CONFIG_TARGET_${PARENT}=y
+          CONFIG_TARGET_${PARENT}_${SUB}=y
           CONFIG_CCACHE=y
           CONFIG_PACKAGE_${{ inputs.package }}=y
           # ssr-plus 在 aarch64 默认拉 Rust 版 shadowsocks，关掉以免编译失败（与固件 config 一致）
@@ -116,11 +126,30 @@ jobs:
           CONFIG_INCLUDE_Shadowsocks_Libev_Client=y
           EOF
           make defconfig
+          # 防御校验：目标架构必须真正生效，否则立即失败（比编到最后才发现架构错了强得多）
+          if ! grep -q "^CONFIG_TARGET_${PARENT}_${SUB}=y" .config; then
+            echo "::error::目标 ${PARENT}/${SUB} 未生效，defconfig 后实际 target 如下："
+            grep '^CONFIG_TARGET_.*=y' .config | head -10
+            exit 1
+          fi
+          echo "==> 生效的目标架构："
+          grep '^CONFIG_TARGET_.*=y' .config | head -5
 
       - name: 下载依赖源码包
         run: |
           cd openwrt
           make download -j8
+
+      # ---------------------------------------------------------------------
+      # 关键：单包编译（make package/X/compile）不会自动构建交叉工具链！
+      # package/X/compile 的依赖链会直接编到 package/libs/toolchain（打包 libc），
+      # 它要从 staging_dir/toolchain-*/lib/ 拷 ld-musl-*.so*，而工具链没建过 → cp 报错。
+      # 必须先显式构建 tools + toolchain（首次较慢，之后 ccache/dl 缓存加速）。
+      - name: 构建工具链（单包编译前置，必须显式构建）
+        run: |
+          cd openwrt
+          make tools/install -j$(nproc) || make tools/install -j1
+          make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
 
       - name: 编译目标包（仅编该包及其依赖，不生成固件镜像）
         id: compile
@@ -141,6 +170,6 @@ jobs:
         if: steps.compile.outputs.status == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: ipk-${{ inputs.package }}-${{ inputs.target }}
+          name: ipk-${{ inputs.package }}-${{ steps.env.outputs.target_key }}
           path: openwrt/bin/packages/**/*.ipk
           retention-days: 14
