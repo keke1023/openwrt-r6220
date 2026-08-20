@@ -151,6 +151,18 @@ jobs:
           make tools/install -j$(nproc) || make tools/install -j1
           make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
 
+      # ---------------------------------------------------------------------
+      # 关键：内核同样不会自动编译！
+      # defconfig 默认会选中 gpio-button-hotplug / mt76 wifi 等 kmod，它们的 .built 依赖
+      # build_dir/.../linux-<ver>/.config + Module.symvers，而 make package/X/compile
+      # 不会自动 prepare/编译内核 → 报 "No rule to make target .../linux-X/.config"。
+      # 必须先 make target/linux/compile（生成 .config + 编译 vmlinux/modules）。
+      # 首次较慢（20-40 分钟），靠 ccache 缓存之后大幅加速。
+      - name: 编译内核（提供 .config + Module.symvers，给 kmod 包用）
+        run: |
+          cd openwrt
+          make target/linux/compile -j$(nproc) || make target/linux/compile -j1 V=s
+
       - name: 编译目标包（仅编该包及其依赖，不生成固件镜像）
         id: compile
         run: |
