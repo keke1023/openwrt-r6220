@@ -1,0 +1,146 @@
+name: Build IPK Only
+
+# 只编译单个/一组 IPK 包，不生成固件镜像。
+# 用法：Actions → Build IPK Only → Run workflow
+#   - target    : 目标架构/子目标（IPK 与架构强相关，必须选对！否则装不到机器上）
+#   - package   : 要编译的包名（含 luci- 前缀），默认 luci-app-ssr-plus
+#   - feed_branch: helloworld 源分支，默认 master（与固件编译一致）
+# 产物：Actions 的 Artifacts（ipk-<包名>-<架构>），含目标包及其全部依赖的 .ipk
+#
+# 说明：单包编译仍需先构建工具链（gcc/binutils/libc/内核头），这部分耗时不可省；
+#       真正省掉的是「生成固件镜像」这一步。ccache + dl 缓存可大幅加速二次运行。
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: '目标架构/子目标（IPK 架构强相关，必须选对）'
+        required: true
+        default: 'mediatek/filogic'
+        type: choice
+        options:
+          - mediatek/filogic
+          - ramips/mt7621
+          - ipq40xx/generic
+          - ath79/nand
+      package:
+        description: '要编译的软件包名（含 luci- 前缀），默认 luci-app-ssr-plus'
+        required: true
+        default: 'luci-app-ssr-plus'
+      feed_branch:
+        description: 'helloworld 源分支（默认 master，与固件编译一致）'
+        required: true
+        default: 'master'
+
+permissions:
+  contents: read        # 仅上传 Artifact，无需写 Release
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: openwrt-23.05
+  TZ: Asia/Shanghai
+
+jobs:
+  build-ipk:
+    runs-on: ubuntu-22.04
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/openwrt/staging_dir/cache
+      CCACHE_MAXSIZE: 5G
+    steps:
+      - name: 清理磁盘空间（避免 runner 空间不足）
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -hT $PWD
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils \
+            bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex \
+            gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool \
+            libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+            libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev \
+            libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf qemu-utils \
+            rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim \
+            wget xmlto xxd zlib1g-dev jq
+
+      - name: 克隆 immortalwrt 源码
+        run: git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+
+      - name: 添加 helloworld 源（luci-app-ssr-plus 来源）
+        run: |
+          cd openwrt
+          echo "src-git helloworld https://github.com/fw876/helloworld.git;${{ inputs.feed_branch }}" >> feeds.conf.default
+
+      - name: 更新并安装 feeds（仅装目标包及其依赖）
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install ${{ inputs.package }}
+
+      # ---------------------------------------------------------------------
+      # 缓存 1：dl 源码包（与固件编译共享同一份 openwrt-dl 缓存，最大提速）
+      # ---------------------------------------------------------------------
+      - name: 缓存 dl 目录（源码包）
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: openwrt-dl
+          restore-keys: |
+            openwrt-dl
+
+      # ---------------------------------------------------------------------
+      # 缓存 2：ccache 编译缓存（按架构共享，二次运行大幅加速）
+      # ---------------------------------------------------------------------
+      - name: 缓存 ccache（按架构）
+        uses: actions/cache@v4
+        with:
+          path: openwrt/staging_dir/cache
+          key: openwrt-ipk-ccache-${{ inputs.target }}
+          restore-keys: |
+            openwrt-ipk-ccache-${{ inputs.target }}
+
+      - name: 生成最小配置（仅选目标架构 + 目标包）
+        run: |
+          cd openwrt
+          TARGET_SYM="CONFIG_TARGET_$(echo '${{ inputs.target }}' | tr '/' '_')=y"
+          cat > .config <<EOF
+          ${TARGET_SYM}
+          CONFIG_CCACHE=y
+          CONFIG_PACKAGE_${{ inputs.package }}=y
+          # ssr-plus 在 aarch64 默认拉 Rust 版 shadowsocks，关掉以免编译失败（与固件 config 一致）
+          CONFIG_INCLUDE_Shadowsocks_Rust_Client=n
+          CONFIG_INCLUDE_Shadowsocks_Rust_Server=n
+          CONFIG_INCLUDE_MosDNS=n
+          CONFIG_INCLUDE_Shadowsocks_Libev_Client=y
+          EOF
+          make defconfig
+
+      - name: 下载依赖源码包
+        run: |
+          cd openwrt
+          make download -j8
+
+      - name: 编译目标包（仅编该包及其依赖，不生成固件镜像）
+        id: compile
+        run: |
+          cd openwrt
+          echo "==> make package/${{ inputs.package }}/compile"
+          make package/${{ inputs.package }}/compile -j$(nproc) V=s || make package/${{ inputs.package }}/compile -j1 V=s
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: 列出产物 IPK
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          cd openwrt
+          echo "=== 生成的 IPK ==="
+          find bin/packages -name '*.ipk' | sort
+
+      - name: 上传 IPK（含依赖）
+        if: steps.compile.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipk-${{ inputs.package }}-${{ inputs.target }}
+          path: openwrt/bin/packages/**/*.ipk
+          retention-days: 14
