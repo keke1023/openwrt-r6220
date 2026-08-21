@@ -67,7 +67,7 @@ jobs:
             libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev \
             libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf qemu-utils \
             rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim \
-            wget xmlto xxd zlib1g-dev jq
+            wget xmlto xxd zlib1g-dev jq python3-pyelftools
 
       - name: 克隆 immortalwrt 源码
         run: git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
