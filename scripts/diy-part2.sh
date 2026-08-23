@@ -61,3 +61,25 @@ if [ -f "$MT7621_MK" ] && grep -q "define Device/dlink_dir-882-a1" "$MT7621_MK";
     sed -i '/define Device\/dlink_dir-882-a1/,/endef/{/DEVICE_PACKAGES += kmod-usb3 kmod-usb-ledtrig-usbport/d}' "$MT7621_MK"
   fi
 fi
+
+# 7) 友华 WR1200JS 去除 USB（用户不需要 USB，纯 SPI 16MB 精简版）
+#    youhua_wr1200js 的 DEVICE_PACKAGES := kmod-mt7603 kmod-mt76x2 kmod-usb3 \
+#        kmod-usb-ledtrig-usbport（单行续行格式，不能整行删，否则 mt7603/mt76x2 也丢）。
+#    用 python 精准剔除 USB 包字样，保留无线包与续行结构。
+MT7621_MK="target/linux/ramips/image/mt7621.mk"
+if [ -f "$MT7621_MK" ] && grep -q "define Device/youhua_wr1200js" "$MT7621_MK"; then
+  if grep -q "kmod-usb3" "$MT7621_MK"; then
+    echo "==> 剔除 WR1200JS 默认 USB 包 (kmod-usb3 / kmod-usb-ledtrig-usbport，保留 mt7603/mt76x2)"
+    python3 - "$MT7621_MK" <<'PYEOF'
+import sys, re
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+# 把 " kmod-usb3 \" 从 DEVICE_PACKAGES 行里剔掉（保留前面的无线包与续行符）
+s = s.replace(" kmod-usb3 \\\n\t", "\n\t")
+# 删掉独立的续行 USB 包行（kmod-usb-ledtrig-usbport）
+s = re.sub(r"\n\tkmod-usb-ledtrig-usbport\n", "\n", s)
+open(p, "w", encoding="utf-8").write(s)
+print("patched mt7621.mk for WR1200JS USB removal")
+PYEOF
+  fi
+fi
