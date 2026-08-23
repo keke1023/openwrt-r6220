@@ -82,7 +82,8 @@ jobs:
         run: |
           cd openwrt
           case "$SRC_BRANCH" in
-            openwrt-18.06*|18.06-k*) echo "==> 源码分支为旧版($SRC_BRANCH)，跳过 helloworld（不兼容）"; exit 0 ;;
+            openwrt-18.06-k*) : ;;                         # 18.06 + 新内核(k5.4)：放行 helloworld
+            openwrt-18.06) echo "==> 源码分支为旧版($SRC_BRANCH)，跳过 helloworld（不兼容）"; exit 0 ;;
           esac
           echo "src-git helloworld https://github.com/fw876/helloworld.git;${{ inputs.feed_branch }}" >> feeds.conf.default
 

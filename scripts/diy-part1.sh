@@ -7,8 +7,11 @@
 #       追加到 feeds.conf.default 末尾，使其同名包优先级高于官方源，确保 ssr-plus 用 helloworld 版本。
 
 SRC_BRANCH="${SOURCE_BRANCH:-openwrt-23.05}"
+# 分支隔离：仅「真正的老 18.06（openwrt-18.06，4.x 内核）」跳过 helloworld master 源；
+# openwrt-18.06-k5.4 是「18.06 包基础 + 5.4 新内核」，兼容 helloworld / ngrokc / frpc，放行。
 case "$SRC_BRANCH" in
-  openwrt-18.06*|18.06-k*) echo "==> 源码分支为旧版($SRC_BRANCH)，跳过 helloworld master 源（不兼容）"; exit 0 ;;
+  openwrt-18.06-k*) : ;;                         # 18.06 + 新内核(k5.4)：放行 helloworld
+  openwrt-18.06) echo "==> 旧版 18.06(老内核 4.x)，跳过 helloworld master 源（不兼容）"; exit 0 ;;
 esac
 
 echo "==> 添加 luci-app-ssr-plus 源（fw876/helloworld）"
