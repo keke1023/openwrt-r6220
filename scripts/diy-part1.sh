@@ -6,5 +6,10 @@
 #       fw876/helloworld 提供 luci-app-ssr-plus 及底层依赖（xray-core / v2ray-core 等）。
 #       追加到 feeds.conf.default 末尾，使其同名包优先级高于官方源，确保 ssr-plus 用 helloworld 版本。
 
+SRC_BRANCH="${SOURCE_BRANCH:-openwrt-23.05}"
+case "$SRC_BRANCH" in
+  openwrt-18.06*|18.06-k*) echo "==> 源码分支为旧版($SRC_BRANCH)，跳过 helloworld master 源（不兼容）"; exit 0 ;;
+esac
+
 echo "==> 添加 luci-app-ssr-plus 源（fw876/helloworld）"
 echo "src-git helloworld https://github.com/fw876/helloworld.git;master" >> feeds.conf.default

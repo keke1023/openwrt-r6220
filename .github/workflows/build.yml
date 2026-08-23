@@ -27,9 +27,11 @@ env:
   TZ: Asia/Shanghai
 
 # ---------------------------------------------------------------------------
-# prepare：扫描 config/ 下所有 *.config，生成 {config, arch} 机型矩阵
-# 新增机型 = 往 config/ 丢一个 xxx.config，无需改动本文件
-# arch 字段用于让同架构机型（如多台 ramips）共享同一份 ccache 缓存
+# prepare：扫描机型配置目录（config/ 或 config-18.06/，按 source_branch 自动选），
+#          生成 {config, arch, cfgdir} 机型矩阵
+# 新增 23.05 机型 = 往 config/ 丢一个 xxx.config；新增 18.06 机型 = 往 config-18.06/ 丢 xxx.config
+# 无需改动本文件。arch 字段用于让同架构机型（如多台 ramips）共享同一份 ccache 缓存
+# cfgdir 字段记录该配置所在目录，build 步骤据此从正确目录加载 .config
 # ---------------------------------------------------------------------------
 jobs:
   prepare:
@@ -40,12 +42,18 @@ jobs:
       - uses: actions/checkout@v4
       - id: gen
         run: |
-          echo "扫描 config/ 下的机型配置："
-          ls -1 config/*.config
+          # 分支隔离：按所选源码分支选择机型配置目录，避免 18.06 等旧分支的 config 污染 23.05
+          SRC="${{ inputs.source_branch || env.REPO_BRANCH }}"
+          case "$SRC" in
+            openwrt-18.06*|18.06-k*) CFG_DIR="config-18.06" ;;
+            *) CFG_DIR="config" ;;
+          esac
+          echo "源码分支：$SRC => 机型配置目录：$CFG_DIR"
+          ls -1 "$CFG_DIR"/*.config
           items=()
           # 本次要编译的机型关键字（逗号分隔，模糊匹配）；留空=全部(仍跳过 ramips)
           TARGETS="${{ github.event.inputs.targets }}"
-          for f in config/*.config; do
+          for f in "$CFG_DIR"/*.config; do
             b=$(basename "$f")
             name=${b%.config}
             arch=$(grep -oE 'CONFIG_TARGET_(ramips|mediatek|ipq40xx|ath79|rockchip|bcm27xx|ipq806x|sunxi)=y' "$f" | head -1 | sed -E 's/CONFIG_TARGET_([a-z0-9]+)=y/\1/')
@@ -62,7 +70,7 @@ jobs:
               done
               [ "$hit" -eq 0 ] && continue
             fi
-            items+=("{\"config\":\"$b\",\"arch\":\"${arch:-unknown}\"}")
+            items+=("{\"config\":\"$b\",\"arch\":\"${arch:-unknown}\",\"cfgdir\":\"$CFG_DIR\"}")
           done
           json=$(printf '%s\n' "${items[@]}" | jq -s -c '.')
           echo "matrix=$json" >> "$GITHUB_OUTPUT"
@@ -143,10 +151,12 @@ jobs:
             openwrt-ccache-${{ matrix.arch }}
 
       - name: 执行 DIY-P1（添加自定义源）
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch || env.REPO_BRANCH }}
         run: |
           cd openwrt
           chmod +x ../$DIY_P1_SH
-          bash ../$DIY_P1_SH
+          ../$DIY_P1_SH
 
       - name: 更新并安装 feeds
         run: |
@@ -160,10 +170,10 @@ jobs:
           chmod +x ../$DIY_P2_SH
           bash ../$DIY_P2_SH
 
-      - name: 加载 ${{ matrix.config }} 并生成默认配置
+      - name: 加载 ${{ matrix.config }}（源自 ${{ matrix.cfgdir }}）并生成默认配置
         run: |
           cd openwrt
-          cp ../config/${{ matrix.config }} .config
+          cp ../${{ matrix.cfgdir }}/${{ matrix.config }} .config
           echo 'CONFIG_CCACHE=y' >> .config   # 启用 ccache，配合上面的 ccache 缓存
           make defconfig
 
