@@ -49,3 +49,15 @@ print("patched nand.mk for DW33D SPI")
 PYEOF
   fi
 fi
+
+# 6) D-Link DIR-882 A1 去除 USB（用户不需要 USB，纯 SPI 16MB 精简版）
+#    dir-882-a1 继承 dlink_dir-8xx-a1 父模板（仅无线），子定义里 DEVICE_PACKAGES += kmod-usb3
+#    kmod-usb-ledtrig-usbport。需从子定义里剔除这两行（设备 profile 写死，.config 删不掉）。
+MT7621_MK="target/linux/ramips/image/mt7621.mk"
+if [ -f "$MT7621_MK" ] && grep -q "define Device/dlink_dir-882-a1" "$MT7621_MK"; then
+  if grep -q "kmod-usb3 kmod-usb-ledtrig-usbport" "$MT7621_MK"; then
+    echo "==> 剔除 DIR-882 A1 默认 USB 包 (kmod-usb3 / kmod-usb-ledtrig-usbport)"
+    # 删掉 dir-882-a1 子定义里追加 USB 的那一行（保持设备 DEVICE 符号不变，仅去 USB 包）
+    sed -i '/define Device\/dlink_dir-882-a1/,/endef/{/DEVICE_PACKAGES += kmod-usb3 kmod-usb-ledtrig-usbport/d}' "$MT7621_MK"
+  fi
+fi
