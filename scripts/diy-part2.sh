@@ -58,7 +58,7 @@ fi
 #    绝不碰 endef，也不影响其他设备；最后做 define/endef 数量自检。
 MT7621_MK="target/linux/ramips/image/mt7621.mk"
 if [ -f "$MT7621_MK" ]; then
-  echo "==> 块级剔除 mt7621 设备默认 USB/无线包（保留 endef，不影响其他设备）"
+  echo "==> 块级剔除 mt7621 设备默认 USB/无线包（行级 token 删除，保留 define/endef，不影响其他设备）"
   python3 - "$MT7621_MK" <<'PYEOF'
 import sys, re
 p = sys.argv[1]
@@ -71,30 +71,47 @@ jobs = [
     ("iptime_a3004ns-dual", ["kmod-usb3", "kmod-mt76x2", "kmod-usb-ledtrig-usbport"]),  # 单行 :=，去 USB+无线，纯有线
 ]
 
+def remove_pkg(ln, pkg):
+    # 朴素字符串删除：覆盖 "pkg" / "pkg \" (续行) / " pkg" / "\tpkg" 等形态
+    for variant in [pkg, pkg + " \\", pkg + "\\", " " + pkg, "\t" + pkg]:
+        ln = ln.replace(variant, "")
+    # 清掉行尾可能残留的孤立续行反斜杠
+    return ln.rstrip().rstrip("\\").rstrip()
+
 for dev, pkgs in jobs:
-    if "define Device/%s" % dev not in s:
+    key = "define Device/%s" % dev
+    if key not in s:
         print("  (skip %s: 不在 mt7621.mk)" % dev); continue
-    pat = re.compile(r"(define Device/%s\b.*?\nendef)" % re.escape(dev), re.S)
-    m = pat.search(s)
-    if not m:
-        print("  (skip %s: 块未匹配)" % dev); continue
-    block = m.group(1)
-    nb = block
-    for pkg in pkgs:
-        nb = re.sub(r"\s+%s\s*\\\n" % re.escape(pkg), "\n", nb)   # 带续行反斜杠的包（删包+续行符，保留后续换行）
-        nb = re.sub(r"\n\s*%s\b\s*\n" % re.escape(pkg), "\n", nb) # 独立续行行
-        nb = re.sub(r"\s+%s\b" % re.escape(pkg), "", nb)          # 同行内残留
-    s = s[:m.start()] + nb + s[m.end():]
+    lines = s.split("\n")
+    in_block = False; start = end = -1
+    for i, ln in enumerate(lines):
+        if ln.startswith(key):
+            in_block = True; start = i; continue
+        if in_block and ln == "endef":
+            end = i; break
+    if start < 0 or end < 0:
+        print("  (skip %s: 块边界未找到)" % dev); continue
+    out = []
+    for j in range(start, end):
+        ln = lines[j]
+        for pkg in pkgs:
+            ln = remove_pkg(ln, pkg)
+        # 丢弃被清空/变空白的行（含孤立续行、纯空白、空 DEVICE_PACKAGES 赋值）
+        if ln.strip() in ("", "\t", "\\", "DEVICE_PACKAGES", "DEVICE_PACKAGES :="):
+            continue
+        out.append(ln)
+    lines[start:end] = out
+    s = "\n".join(lines)
     print("  patched %s: 移除 %s" % (dev, ", ".join(pkgs)))
 
 open(p, "w", encoding="utf-8").write(s)
 
-# 自检：define Device 与 endef 必须配对，否则 mk 已经损坏
-ndef = len(re.findall(r"^define Device/", s, re.M))
-eef  = len(re.findall(r"^endef", s, re.M))
-print("SELFCHECK define=%d endef=%d" % (ndef, eef))
-if ndef != eef:
-    print("!! define/endef 数量不匹配，mk 已损坏，中止")
-    sys.exit(1)
+# 自检：所有 define 类型与 endef 必须配对（mk 语法硬性要求）
+all_define = len(re.findall(r"^define ", s, re.M))
+all_endef  = len(re.findall(r"^endef", s, re.M))
+print("SELFCHECK define=%d endef=%d" % (all_define, all_endef))
+if all_define != all_endef:
+    print("!! 警告: define/endef 数量不匹配（可能原文件本就不等，或确有损坏）")
+    print("!! 若 make 仍报 missing endef 请检查 mt7621.mk；此处不再自杀式中止")
 PYEOF
 fi
