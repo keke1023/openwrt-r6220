@@ -83,3 +83,15 @@ print("patched mt7621.mk for WR1200JS USB removal")
 PYEOF
   fi
 fi
+
+# 8) ipTIME A3004NS-Dual 去除 USB + 无线驱动（用户要求：纯有线路由，不要无线/USB）
+#    iptime_a3004ns-dual 的 DEVICE_PACKAGES := kmod-usb3 kmod-mt76x2 kmod-usb-ledtrig-usbport
+#    （单行格式，无续行）。该设备去 USB+无线后无任何额外包，直接清空 DEVICE_PACKAGES 行。
+MT7621_MK="target/linux/ramips/image/mt7621.mk"
+if [ -f "$MT7621_MK" ] && grep -q "define Device/iptime_a3004ns-dual" "$MT7621_MK"; then
+  if grep -q "kmod-mt76x2" "$MT7621_MK"; then
+    echo "==> 剔除 A3004NS-Dual 默认 USB + 无线包 (kmod-usb3 / kmod-mt76x2 / kmod-usb-ledtrig-usbport)"
+    # 清空该设备的 DEVICE_PACKAGES（保留设备符号与 uimage-lzma-loader）
+    sed -i '/define Device\/iptime_a3004ns-dual/,/endef/{/DEVICE_PACKAGES := kmod-usb3 kmod-mt76x2 kmod-usb-ledtrig-usbport/d}' "$MT7621_MK"
+  fi
+fi
