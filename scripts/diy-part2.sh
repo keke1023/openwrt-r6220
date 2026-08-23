@@ -41,6 +41,9 @@ add = ("\n"
        "  IMAGE/factory-nor.bin := append-kernel | pad-to 4096k | append-rootfs | pad-rootfs | check-size 15360k\n"
        "  IMAGE/sysupgrade-nor.bin := append-kernel | pad-to 4096k | append-rootfs | pad-rootfs | check-size 15360k | append-metadata\n")
 s = s[:m.end(1)] + add + s[m.end(1):]
+# 剔除 DW33D 设备默认的 USB 包（用户不需要 USB，纯 SPI 精简版）
+s = s.replace("kmod-usb2 kmod-usb-storage kmod-usb-ledtrig-usbport \\\n\t", "")
+s = s.replace("kmod-usb2 kmod-usb-storage kmod-usb-ledtrig-usbport", "")
 open(p, "w", encoding="utf-8").write(s)
 print("patched nand.mk for DW33D SPI")
 PYEOF
