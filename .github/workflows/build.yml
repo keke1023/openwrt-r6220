@@ -7,6 +7,10 @@ on:
         description: '只编译指定机型：逗号分隔的 config 基名，模糊匹配。留空=编译全部(仍跳过ramips)。示例：dw33d,rax3000m'
         required: false
         default: ''
+      source_branch:
+        description: 'immortalwrt 源码分支（克隆时 -b 参数）。默认 openwrt-23.05；可填 openwrt-18.06-k5.4 等旧分支'
+        required: false
+        default: 'openwrt-23.05'
 #  push:
 #    branches: [master]      # 如需 push 自动触发编译，取消注释这两行即可
 #  schedule:
@@ -102,8 +106,8 @@ jobs:
             rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim \
             wget xmlto xxd zlib1g-dev jq python3-pyelftools
 
-      - name: 克隆源码
-        run: git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+      - name: 克隆源码（分支由 source_branch 输入决定，默认 openwrt-23.05）
+        run: git clone --depth 1 $REPO_URL -b "${{ inputs.source_branch || env.REPO_BRANCH }}" openwrt
 
       # ---------------------------------------------------------------------
       # 删除过时的 ipq40xx 内核补丁 401（避免打补丁阶段失败）

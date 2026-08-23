@@ -31,6 +31,10 @@ on:
         description: 'helloworld 源分支（默认 master，与固件编译一致）'
         required: true
         default: 'master'
+      source_branch:
+        description: 'immortalwrt 源码分支（克隆时 -b 参数）。默认 openwrt-23.05；可填 openwrt-18.06-k5.4 等旧分支'
+        required: false
+        default: 'openwrt-23.05'
 
 permissions:
   contents: read        # 仅上传 Artifact，无需写 Release
@@ -69,8 +73,8 @@ jobs:
             rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim \
             wget xmlto xxd zlib1g-dev jq python3-pyelftools
 
-      - name: 克隆 immortalwrt 源码
-        run: git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+      - name: 克隆 immortalwrt 源码（分支由 source_branch 输入决定，默认 openwrt-23.05）
+        run: git clone --depth 1 $REPO_URL -b "${{ inputs.source_branch || env.REPO_BRANCH }}" openwrt
 
       - name: 添加 helloworld 源（luci-app-ssr-plus 来源）
         run: |
