@@ -162,13 +162,25 @@ jobs:
         run: |
           cd openwrt
           ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          # -f 关键：helloworld 源(luci-app-ssr-plus)追加在 feeds.conf.default 末尾，
+          # 与 immortalwrt 官方 luci 源同名包冲突。feeds install 默认「先到先得」，
+          # 不加 -f 时官方版先装、helloworld 版被跳过 -> 编出的是官方原版 ssr-plus。
+          # 加 -f 让后者(helloworld)强制覆盖前者，确保用 helloworld 带 xray reality 补丁的版本。
+          ./scripts/feeds install -a -f
 
       - name: 执行 DIY-P2（修改默认设置）
         run: |
           cd openwrt
           chmod +x ../$DIY_P2_SH
           bash ../$DIY_P2_SH
+
+      - name: 诊断 ssr-plus 来源（确认 helloworld 版生效）
+        run: |
+          cd openwrt
+          echo "==> luci-app-ssr-plus 软链指向："
+          ls -la package/feeds/luci/luci-app-ssr-plus 2>/dev/null || echo "!! 未在 package/feeds/luci 下找到 luci-app-ssr-plus"
+          echo "==> helloworld feed 下是否存在："
+          ls -d feeds/helloworld/luci-app-ssr-plus 2>/dev/null || echo "!! helloworld feed 目录下无 luci-app-ssr-plus"
 
       - name: 加载 ${{ matrix.config }}（源自 ${{ matrix.cfgdir }}）并生成默认配置
         run: |
