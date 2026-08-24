@@ -7,19 +7,19 @@
 #       select 把一批 LuCI 应用（diskman / passwall / rclone / turboacc）和 openssl 链
 #       默认拽入。在 config-*.config 里写 =n 仍可能被 select 覆盖（实测 turboacc 的
 #       TURBOACC_INCLUDE_* 子项 defconfig 后仍 =y），故必须在 defconfig 之后用 sed 强制
-#       =n 并重新 defconfig 固化。
+#       =n。
 #
-# 剔除清单（对「vless+reality + ngrokc」最小目标均非必需）：
-#   - luci-app-diskman(+INCLUDE_btrfs_progs/lsblk)：无 USB/存储
-#   - luci-app-passwall(+INCLUDE_*)：与 ssr-plus 重复
-#   - luci-app-rclone(+INCLUDE_*)：网盘，不需要
-#   - luci-app-turboacc(+TURBOACC_INCLUDE_*)：NAT offload，xray 用户态无增益
-#   - openssl 链：仅保留 mbedtls 后端（libustream-mbedtls=y 已在 config 选），
-#     去掉 libustream-openssl / libopenssl / wpad-basic-openssl（退回 mbedtls 版 wpad），
-#     否则 openssl ~1MB 被 ssr-plus 的 INCLUDE_libustream-openssl 拉回。
+# ⚠️ 关键陷阱（实测踩过）：
+#   - `make defconfig` 会把 default y 的包翻回 =y，会把阶段1的 =n 废掉。
+#   - 因此采用「两阶段 sed」：阶段1 sed =n → 阶段2 defconfig 补全新符号 →
+#     阶段3 再次 sed =n（此时 default y 的能被显式 =n 覆盖；select 的若已无 select 源
+#     也能压住）→ 阶段4 不跑 defconfig，直接交棒给后续 make（make 会自动 oldconfig 补全，
+#     但不会把已显式 =n 的翻回）。
+#   - openssl 链是硬依赖：wpad-basic-openssl / luci-lib-nixio_openssl / ssr-plus 的
+#     INCLUDE_libustream-openssl 都 select libopenssl。只要这三个 =n，libopenssl 就失去
+#     所有 select 源，自身 =n 即可生效。故阶段1必须把这三个父包也 =n。
 
-echo "==> 强制剔除默认全家桶与 openssl 链（16MB SPI 精简）"
-
+echo "==> [阶段1] 强制 =n（defconfig 前初次标记）"
 FORCE_OFF="\
 luci-app-diskman \
 luci-app-diskman_INCLUDE_btrfs_progs \
@@ -50,17 +50,27 @@ dns2tcp \
 "
 
 for p in $FORCE_OFF; do
-  # 把任意已存在的 =y/=m 改成 =n；不存在则追加 =n（重新 defconfig 后按需生效）
   sed -i "s/^CONFIG_PACKAGE_${p}=[ym]/CONFIG_PACKAGE_${p}=n/" .config
   grep -q "^CONFIG_PACKAGE_${p}=" .config || echo "CONFIG_PACKAGE_${p}=n" >> .config
 done
 
-# wpad-basic-openssl 去掉后，让 defconfig 选回默认 wpad-basic（mbedtls 或无加密版）
+# wpad-basic-openssl 去掉后，显式选回基础版 wpad-basic（mbedtls/无 TLS，家用 WPA2 足够）
 sed -i '/^CONFIG_PACKAGE_wpad-basic-openssl=/d' .config
-echo "CONFIG_PACKAGE_wpad-basic=m" >> .config
+grep -q '^CONFIG_PACKAGE_wpad-basic=' .config || echo "CONFIG_PACKAGE_wpad-basic=m" >> .config
 
-# 重新 defconfig 固化强制 =n
+echo "==> [阶段2] make defconfig（补全新符号，会翻回部分 default y）"
 make defconfig
 
-echo "==> 全家桶剔除完成，复核关键包状态："
-grep -E 'luci-app-diskman|luci-app-passwall|luci-app-rclone|luci-app-turboacc|libopenssl|libustream-openssl|wpad-basic' .config | head -20
+echo "==> [阶段3] defconfig 后再次强制 =n（此时 default y 可被覆盖；openssl 链已无 select 源）"
+for p in $FORCE_OFF; do
+  sed -i "s/^CONFIG_PACKAGE_${p}=[ym]/CONFIG_PACKAGE_${p}=n/" .config
+  grep -q "^CONFIG_PACKAGE_${p}=" .config || echo "CONFIG_PACKAGE_${p}=n" >> .config
+done
+sed -i '/^CONFIG_PACKAGE_wpad-basic-openssl=/d' .config
+grep -q '^CONFIG_PACKAGE_wpad-basic=' .config || echo "CONFIG_PACKAGE_wpad-basic=m" >> .config
+
+echo "==> [阶段4] 不重跑 defconfig，直接复核关键包状态："
+echo "--- 期望全为 =n ---"
+grep -E 'luci-app-diskman|luci-app-passwall|luci-app-rclone|luci-app-turboacc|libopenssl|libustream-openssl|wpad-basic-openssl|chinadns-ng|microsocks|dns2socks|dns2tcp|luci-lib-nixio_openssl|luci-app-ssr-plus_INCLUDE_libustream-openssl' .config
+echo "--- wpad 实际选型 ---"
+grep -E '^CONFIG_PACKAGE_wpad' .config
