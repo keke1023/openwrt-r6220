@@ -5,12 +5,15 @@
 # 作用：升级 Golang 工具链，满足 xray-core 编译需求。
 #
 # 背景：18.06-k5.4 自带的 feeds/packages/lang/golang 版本过低（Go < 1.21），
-#       而 helloworld 的 xray-core v26.5.9 的 go.mod 要求 go 1.26，
-#       直接用自带 golang 会编不过 xray-core（实测确认）。
+#       helloworld 的 xray-core 各版本对 Go 都有自己的最低要求：
+#       - 本仓库锁的 xray-core v1.8.24（go.mod 要求 go 1.21）：用 Go 1.22（sbwml 22.x）最稳，
+#         既不缺（>=1.21）、又不会因 Go 过新（如 1.26）触发 sing 老依赖
+#         `net.errNoSuchInterface` 链接错误（invalid reference to net.errNoSuchInterface）。
+#       - 若日后切到 xray-core v25/v26（go.mod 要求 go 1.25+/1.26），再把此处换回 26.x。
 #
 # 方案（社区验证，见 openwrt-passwall/xray-core 讨论）：
-#   整体替换 feeds/packages/lang/golang 为 sbwml/packages_lang_golang 的 26.x 分支
-#   （提供 Go 1.26.7）。该仓库的 golang-package.mk 机制与 OpenWrt 22.03+ 一致、
+#   整体替换 feeds/packages/lang/golang 为 sbwml/packages_lang_golang 的对应分支
+#   （分支号 = Go 大版本）。该仓库的 golang-package.mk 机制与 OpenWrt 22.03+ 一致、
 #   对 18.06-k5.4 可直接 include，且 host 构建从 dl.google.com 下载 Go 源码 bootstrap。
 #
 # 为何放 feeds update 之后：
@@ -30,12 +33,14 @@ if [ ! -d "feeds/packages/lang" ]; then
   exit 1
 fi
 
-echo "==> 升级 Golang 工具链为 Go 1.26 (sbwml/packages_lang_golang 26.x)"
+# xray-core v1.8.24 -> go 1.21 需求 -> 选用 Go 1.22 (sbwml 22.x)
+GOLANG_BRANCH="22.x"
+echo "==> 升级 Golang 工具链为 Go 1.22 (sbwml/packages_lang_golang ${GOLANG_BRANCH})"
 echo "==> 当前自带 golang 版本："
 grep -E "^PKG_VERSION|^GO_VERSION" feeds/packages/lang/golang/golang/Makefile 2>/dev/null | head -3 || echo "  (无法读取旧版本)"
 
 rm -rf feeds/packages/lang/golang
-git clone --depth 1 -b 26.x https://github.com/sbwml/packages_lang_golang.git feeds/packages/lang/golang
+git clone --depth 1 -b "$GOLANG_BRANCH" https://github.com/sbwml/packages_lang_golang.git feeds/packages/lang/golang
 if [ ! -f "feeds/packages/lang/golang/golang/Makefile" ]; then
   echo "!! 错误：golang 包替换失败，feeds/packages/lang/golang/golang/Makefile 不存在"
   exit 1
