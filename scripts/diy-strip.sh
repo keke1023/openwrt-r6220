@@ -9,6 +9,11 @@
 #       TURBOACC_INCLUDE_* 子项 defconfig 后仍 =y），故必须在 defconfig 之后用 sed 强制
 #       =n。
 #
+# ⚠️ 注意：dns2socks / dns2tcp / microsocks / chinadns-ng 是 luci-app-ssr-plus 的硬依赖
+#       （Makefile DEPENDS/select），不可强制 =n，否则 luci-app-ssr-plus/compile 报
+#       "No rule to make target .../dns2socks/compile"。它们随 ssr-plus 默认选中，保留。
+#       （之前 INCLUDE_DNS2SOCKS=n 等开关对它们无效，ssr-plus 仍会拉。）
+#
 # ⚠️ 关键陷阱（实测踩过）：
 #   - `make defconfig` 会把 default y 的包翻回 =y，会把阶段1的 =n 废掉。
 #   - 因此采用「两阶段 sed」：阶段1 sed =n → 阶段2 defconfig 补全新符号 →
@@ -43,10 +48,6 @@ libopenssl-conf \
 wpad-basic-openssl \
 luci-app-ssr-plus_INCLUDE_libustream-openssl \
 luci-lib-nixio_openssl \
-chinadns-ng \
-microsocks \
-dns2socks \
-dns2tcp \
 "
 
 for p in $FORCE_OFF; do
