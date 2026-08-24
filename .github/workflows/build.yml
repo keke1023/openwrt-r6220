@@ -194,6 +194,12 @@ jobs:
           echo 'CONFIG_CCACHE=y' >> .config   # 启用 ccache，配合上面的 ccache 缓存
           make defconfig
 
+      - name: 强制剔除默认全家桶与 openssl 链（defconfig 之后固化）
+        run: |
+          cd openwrt
+          chmod +x ../scripts/diy-strip.sh
+          bash ../scripts/diy-strip.sh
+
       - name: 诊断：dump 实际生效配置与已选大包
         run: |
           cd openwrt
