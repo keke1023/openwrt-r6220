@@ -194,6 +194,17 @@ jobs:
           echo 'CONFIG_CCACHE=y' >> .config   # 启用 ccache，配合上面的 ccache 缓存
           make defconfig
 
+      - name: 诊断：dump 实际生效配置与已选大包
+        run: |
+          cd openwrt
+          echo "===== 实际 .config 中显式选中的包（带 =y/=m，排除 =n）====="
+          grep -E '=y|=m' .config | grep -iE 'PACKAGE_' | sort
+          echo
+          echo "===== 体积粗排：编译后各 ipk 大小（若已编出 staging）====="
+          # 若尚未编译，至少列出被选中且体积敏感的关键包
+          echo "==> 检查 ath10k / ssr-plus 相关选中状态："
+          grep -E 'kmod-ath10k|ath10k-firmware|luci-app-ssr-plus|chinadns|pdnsd|smartdns|ipt2socks|microsocks|PACKAGE_xray|PACKAGE_v2ray' .config
+
       - name: 下载依赖源码包（先下完再编译，降低超时风险；已缓存的包会自动跳过）
         run: |
           cd openwrt
