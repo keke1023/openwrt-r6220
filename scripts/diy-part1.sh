@@ -21,19 +21,19 @@ case "$SRC_BRANCH" in
 esac
 
 # ---------------------------------------------------------------------------
-# xray-core 版本锁：helloworld master 当前 xray-core 已涨到 v26.x（Go 1.26 静态二进制
-# 约 13MB+），在 16MB SPI 闪存设备(dw33d-spi)上编出来固件 28MB 直接装不下。
-# reality 协议自 Xray-core v1.8.0 起即支持，故锁到 helloworld 历史里的 v1.8.7
-# （commit bdf6b123cadb776d97cf2d9dd1afb516b046912a，2024-01-08）：体积小（Go 1.20 时代）、
-# PKG_HASH 由 helloworld 当时算好可直接用、reality 完全可用。Go 1.26 向下兼容其 1.20 需求。
-# 仅回退 xray-core 子目录，ssr-plus Luci 界面与其他 helloworld 包保持 master 最新。
+# 整库回退到指定 commit：helloworld master 当前 xray-core 已涨到 v26.x（Go 1.26 静态
+# 二进制约 13MB+），在 16MB SPI 闪存设备(dw33d-spi)上编出来固件 28MB 直接装不下。
+# 仅回退 xray-core 子目录仍无效（实测仍 28MB），故改为把整个 helloworld 仓库
+# checkout 到 coolsnowwolf 2024-09-13 的 commit 24a191cedb8ce45dc07343544a78ef2369c68098
+# （该提交即 "xray-core: update to 1.8.24"），ssr-plus / xray-core / 其他 helloworld
+# 包全部停在 2024-09 状态。xray-core v1.8.24 体积小且 reality 完全可用。
+# 全量 clone（非浅克隆）：后续需 git checkout 历史 commit，浅克隆无法可靠取到旧树。
 # ---------------------------------------------------------------------------
-XRAY_OLD_COMMIT="bdf6b123cadb776d97cf2d9dd1afb516b046912a"
+HELLOWORLD_PIN_COMMIT="24a191cedb8ce45dc07343544a78ef2369c68098"
 
 echo "==> 添加 luci-app-ssr-plus 源（fw876/helloworld，clone 到 package/helloworld）"
 rm -rf package/helloworld
-# 全量 clone（非浅克隆）：后续需 git checkout 历史 commit 的 xray-core 子目录，
-# 浅克隆无法可靠取到旧 commit 的树。helloworld 仓库含历史但 runner 空间/网速足够。
+# 全量 clone：后续 checkout 历史 commit 需要完整历史。
 git clone https://github.com/fw876/helloworld.git package/helloworld
 if [ ! -d "package/helloworld/luci-app-ssr-plus" ]; then
   echo "!! 错误：helloworld clone 未包含 luci-app-ssr-plus，请检查网络/源可用性"
@@ -41,17 +41,15 @@ if [ ! -d "package/helloworld/luci-app-ssr-plus" ]; then
 fi
 echo "==> helloworld 已就绪，luci-app-ssr-plus 来自：package/helloworld/luci-app-ssr-plus"
 
-echo "==> 回退 xray-core 到 v1.8.7（commit $XRAY_OLD_COMMIT），缩小体积以适配 16MB 闪存"
-if [ -d "package/helloworld/xray-core" ]; then
-  cd package/helloworld
-  git fetch --depth 1 origin "$XRAY_OLD_COMMIT" 2>/dev/null || git fetch origin "$XRAY_OLD_COMMIT"
-  git checkout "$XRAY_OLD_COMMIT" -- xray-core/
-  cd ../..
-  XRAY_VER=$(grep -m1 'PKG_VERSION:=' package/helloworld/xray-core/Makefile | cut -d'=' -f2)
-  echo "==> xray-core 当前锁定版本：v$XRAY_VER"
-  if [ "$XRAY_VER" != "1.8.7" ]; then
-    echo "!! 警告：xray-core 版本回退失败（实际 v$XRAY_VER），固件可能仍过大"
-  fi
-else
-  echo "!! 警告：package/helloworld/xray-core 不存在，跳过版本回退"
+echo "==> 整库回退 helloworld 到 commit $HELLOWORLD_PIN_COMMIT（xray-core v1.8.24，适配 16MB 闪存）"
+cd package/helloworld
+git checkout "$HELLOWORLD_PIN_COMMIT"
+cd ../..
+# 自检：确认 xray-core 版本与 ssr-plus 存在
+XRAY_VER=$(grep -m1 'PKG_VERSION:=' package/helloworld/xray-core/Makefile 2>/dev/null | cut -d'=' -f2)
+echo "==> xray-core 当前锁定版本：v${XRAY_VER:-未知}"
+# 回退后目录会变 dirty（对比原 clone 的 master tip），但构建只扫描源码，无影响；
+# 仅提示，不阻断。
+if [ -z "$XRAY_VER" ]; then
+  echo "!! 警告：未能读取 xray-core 版本，固件可能仍过大"
 fi
