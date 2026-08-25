@@ -25,12 +25,10 @@ esac
 #   - 18.06-k5.4：整体 checkout 到 coolsnowwolf 2024-09-13 的 commit
 #       24a191cedb8ce45dc07343544a78ef2369c68098（即 "xray-core: update to 1.8.24"），
 #       ssr-plus 停在 188、xray-core 停在 v1.8.24，适配老内核 + 小闪存。
-#   - 23.05 / master：用 helloworld 最新 master（ssr-plus 升到最新 >188），
-#       但 16MB SPI NOR 设备(dw33d-spi)装不下 xray v26.x（Go 1.26 静态二进制约 13MB+，
-#       编出固件 28MB 直接爆 14.12MB 可用分区），故仅把 xray-core 子目录钉回 v1.8.24
-#       （其余 ssr-plus / shadowsocksr-libev / pdnsd-alt 等仍最新）。
-#       xray-core v1.8.24 体积小且 reality 完全可用，dw33d/kst 等大机型一致无害。
-# 全量 clone（非浅克隆）：后续需 git checkout 历史 commit / 子目录，浅克隆不可靠。
+#   - 23.05 / master：用 helloworld 最新 master（ssr-plus 升到最新 >188，xray-core 也升
+#       最新 v26.x）。23.05 的 16MB SPI NOR 机型(dw33d-spi)已移除，23.05 仅剩装得下最新
+#       xray 的大闪存机型（dw33d NAND 128MB / kst / cmcc_a10 / rax3000m / r2s 等）。
+# 全量 clone（非浅克隆）：后续 18.06 需 git checkout 历史 commit，浅克隆不可靠。
 # ---------------------------------------------------------------------------
 HELLOWORLD_PIN_COMMIT="24a191cedb8ce45dc07343544a78ef2369c68098"
 
@@ -51,8 +49,8 @@ case "$SRC_BRANCH" in
     git checkout "$HELLOWORLD_PIN_COMMIT"
     ;;
   *)
-    echo "==> 23.05/master：用最新 master（ssr-plus 升最新），仅把 xray-core 钉回 v1.8.24（保 dw33d 16MB 不爆）"
-    git checkout "$HELLOWORLD_PIN_COMMIT" -- xray-core/
+    echo "==> 23.05/master：用 helloworld 最新 master（ssr-plus + xray 均最新；Rust 已在下方剥离）"
+    # 不 checkout：clone 默认拉的就是 master 最新，整库采用最新源码
     ;;
 esac
 cd ../..
