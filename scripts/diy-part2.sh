@@ -37,21 +37,21 @@ pre, post = m.group(1), m.group(2)
 if "factory-nor.bin" in pre:
     print("already patched, skip")
     sys.exit(0)
-# 1) 在 -nor 变体内追加 NOR 友好镜像（带 check-size 15360k=15MiB，< 16MiB NOR）
+# 1) 在 -nor 变体内追加 NOR 友好镜像（带 check-size 14464k=15MiB，< 16MiB NOR）
 #    同时用 DEVICE_PACKAGES:= 覆盖继承来的 USB 包（纯 SPI 精简版，保留 ath10k 5G）
 add = ("\n"
        "  DEVICE_PACKAGES := kmod-ath10k-ct ath10k-firmware-qca988x-ct\n"
        "  IMAGES += factory-nor.bin sysupgrade-nor.bin\n"
-       "  IMAGE/factory-nor.bin := append-kernel | pad-to 4096k | append-rootfs | pad-rootfs | check-size 15360k\n"
-       "  IMAGE/sysupgrade-nor.bin := append-kernel | pad-to 4096k | append-rootfs | pad-rootfs | check-size 15360k | append-metadata\n")
+       "  IMAGE/factory-nor.bin := append-kernel | pad-to 4096k | append-rootfs | pad-rootfs | check-size 14464k\n"
+       "  IMAGE/sysupgrade-nor.bin := append-kernel | pad-to 4096k | append-rootfs | pad-rootfs | check-size 14464k | append-metadata\n")
 new_block = pre + add + post
-# 2) 钉死 breed-factory.bin：pad-to 强制 14528k（防被放大成 28MB）+ check-size 15360k（禁止超 16MiB NOR）
+# 2) 钉死 breed-factory.bin：pad-to 强制 14528k（防被放大成 28MB）+ check-size 14464k（禁止超 16MiB NOR）
 new_block = re.sub(
     r"  IMAGE/breed-factory\.bin :=.*?append-okli-kernel \$\(1\)",
-    "  IMAGE/breed-factory.bin := append-kernel | pad-to 64k | append-rootfs | pad-rootfs | prepad-okli-kernel $(1) | pad-to 14528k | append-okli-kernel $(1) | check-size 15360k",
+    "  IMAGE/breed-factory.bin := append-kernel | pad-to 64k | append-rootfs | pad-rootfs | prepad-okli-kernel $(1) | pad-to 14464k | append-okli-kernel $(1) | check-size 14464k",
     new_block, flags=re.S)
-# 3) -nor 的 IMAGE_SIZE 提到 15360k，使默认 sysupgrade.bin 的 check-size 也能放下 ~14.6MiB 内容
-new_block = re.sub(r"IMAGE_SIZE := 14464k", "IMAGE_SIZE := 15360k", new_block)
+# 3) -nor 的 IMAGE_SIZE 提到 14464k，使默认 sysupgrade.bin 的 check-size 也能放下 ~14.6MiB 内容
+new_block = re.sub(r"IMAGE_SIZE := 14464k", "IMAGE_SIZE := 14464k", new_block)
 open(p, "w", encoding="utf-8").write(s[:m.start()] + new_block + s[m.end():])
 print("patched nand.mk for DW33D SPI (-nor variant)")
 PYEOF
