@@ -59,12 +59,13 @@ cd ../..
 echo "==> 剥离 shadowsocks-rust（Rust 工具链在 aarch64/filogic 上编译极慢；ssr-plus 用 shadowsocks-libev 版即可，去掉 Rust 不影响 SSR/V2Ray/Xray 单出口，且 kst-wf3000a 等机型不再被拖慢）"
 SSRP_MK="package/helloworld/luci-app-ssr-plus/Makefile"
 if [ -f "$SSRP_MK" ]; then
-  # aarch64 上 INCLUDE_Shadowsocks_Rust_Client 默认 y，并经 select PACKAGE_shadowsocks-rust 强制拽入 Rust；
-  # 光在 seed config 写 =n 关不掉被 select 的选项（defconfig 会翻回），故从源头删掉 select
-  sed -i '/select.*shadowsocks-rust/d' "$SSRP_MK"
-  # 若 DEPENDS 里存在硬依赖 +shadowsocks-rust / +PACKAGE_shadowsocks-rust 也一并删除（保险）
-  sed -i '/+shadowsocks-rust/d' "$SSRP_MK"
-  sed -i '/+PACKAGE_shadowsocks-rust/d' "$SSRP_MK"
+  # aarch64 上 INCLUDE_Shadowsocks_Rust_Client 默认 y，并通过 DEPENDS 条件依赖
+  #   +PACKAGE_$(PKG_NAME)_INCLUDE_Shadowsocks_Rust_Client:shadowsocks-rust-sslocal
+  # 强制拽入 Rust（shadowsocks-rust 1.24.0 要求 rustc 1.88，编译极慢且易失败）。
+  # 该写法既不是 select 也不是 +shadowsocks-rust，旧 sed 漏匹配；故直接删除所有含
+  # shadowsocks-rust 的依赖行（覆盖 select / +PKG:shadowsocks-rust-xxx 等任意写法）。
+  # 删后即便 INCLUDE_Shadowsocks_Rust_Client=y 也不再拉 Rust 子包，ssr-plus 改走 libev 版。
+  sed -i '/shadowsocks-rust/d' "$SSRP_MK"
   echo "==> 已剥离 shadowsocks-rust（INCLUDE_Shadowsocks_Rust_*=n 现在才真正生效，aarch64 不再编译 Rust）"
 else
   echo "!! 未找到 $SSRP_MK，跳过 Rust 剥离（请确认 helloworld 源已就位）"
