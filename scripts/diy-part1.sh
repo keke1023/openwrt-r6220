@@ -21,13 +21,16 @@ case "$SRC_BRANCH" in
 esac
 
 # ---------------------------------------------------------------------------
-# 整库回退到指定 commit：helloworld master 当前 xray-core 已涨到 v26.x（Go 1.26 静态
-# 二进制约 13MB+），在 16MB SPI 闪存设备(dw33d-spi)上编出来固件 28MB 直接装不下。
-# 仅回退 xray-core 子目录仍无效（实测仍 28MB），故改为把整个 helloworld 仓库
-# checkout 到 coolsnowwolf 2024-09-13 的 commit 24a191cedb8ce45dc07343544a78ef2369c68098
-# （该提交即 "xray-core: update to 1.8.24"），ssr-plus / xray-core / 其他 helloworld
-# 包全部停在 2024-09 状态。xray-core v1.8.24 体积小且 reality 完全可用。
-# 全量 clone（非浅克隆）：后续需 git checkout 历史 commit，浅克隆无法可靠取到旧树。
+# 分支策略（按 SOURCE_BRANCH 选 helloworld 版本）：
+#   - 18.06-k5.4：整体 checkout 到 coolsnowwolf 2024-09-13 的 commit
+#       24a191cedb8ce45dc07343544a78ef2369c68098（即 "xray-core: update to 1.8.24"），
+#       ssr-plus 停在 188、xray-core 停在 v1.8.24，适配老内核 + 小闪存。
+#   - 23.05 / master：用 helloworld 最新 master（ssr-plus 升到最新 >188），
+#       但 16MB SPI NOR 设备(dw33d-spi)装不下 xray v26.x（Go 1.26 静态二进制约 13MB+，
+#       编出固件 28MB 直接爆 14.12MB 可用分区），故仅把 xray-core 子目录钉回 v1.8.24
+#       （其余 ssr-plus / shadowsocksr-libev / pdnsd-alt 等仍最新）。
+#       xray-core v1.8.24 体积小且 reality 完全可用，dw33d/kst 等大机型一致无害。
+# 全量 clone（非浅克隆）：后续需 git checkout 历史 commit / 子目录，浅克隆不可靠。
 # ---------------------------------------------------------------------------
 HELLOWORLD_PIN_COMMIT="24a191cedb8ce45dc07343544a78ef2369c68098"
 
@@ -41,9 +44,17 @@ if [ ! -d "package/helloworld/luci-app-ssr-plus" ]; then
 fi
 echo "==> helloworld 已就绪，luci-app-ssr-plus 来自：package/helloworld/luci-app-ssr-plus"
 
-echo "==> 整库回退 helloworld 到 commit $HELLOWORLD_PIN_COMMIT（xray-core v1.8.24，适配 16MB 闪存）"
 cd package/helloworld
-git checkout "$HELLOWORLD_PIN_COMMIT"
+case "$SRC_BRANCH" in
+  openwrt-18.06-k*)
+    echo "==> 18.06-k5.4：整库 checkout 到 $HELLOWORLD_PIN_COMMIT（ssr-plus 188 + xray v1.8.24，老内核/小闪存）"
+    git checkout "$HELLOWORLD_PIN_COMMIT"
+    ;;
+  *)
+    echo "==> 23.05/master：用最新 master（ssr-plus 升最新），仅把 xray-core 钉回 v1.8.24（保 dw33d 16MB 不爆）"
+    git checkout "$HELLOWORLD_PIN_COMMIT" -- xray-core/
+    ;;
+esac
 cd ../..
 
 echo "==> 剥离 shadowsocks-rust（Rust 工具链在 aarch64/filogic 上编译极慢；ssr-plus 用 shadowsocks-libev 版即可，去掉 Rust 不影响 SSR/V2Ray/Xray 单出口，且 kst-wf3000a 等机型不再被拖慢）"
