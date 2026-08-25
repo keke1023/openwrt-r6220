@@ -39,11 +39,16 @@ if "factory-nor.bin" in pre:
     sys.exit(0)
 # 1) 在 -nor 变体内追加 NOR 友好镜像（带 check-size 14464k=15MiB，< 16MiB NOR）
 #    同时用 DEVICE_PACKAGES:= 覆盖继承来的 USB 包与 ath10k 5G（纯 SPI 精简版，砍掉 ath10k 5G 省空间，仅保留 2.4G ath9k）
+#    ⚠️ 内核 pad 必须用 pad-to $$$$(BLOCKSIZE)（64k 对齐），不能用 pad-to 4096k：
+#       父设备 domywifi_dw33d 的 KERNEL_SIZE=5120k（内核分区 5MB），本配置很肥，
+#       压缩内核易超 4MB，pad-to 4096k 会触发 "file is bigger than pad size" 导致
+#       这两个镜像构建失败、进而拖垮整个 domywifi_dw33d-nor 设备（一个 .bin 都不出）。
+#       官方 sysupgrade.bin/breed-factory.bin 正是用 pad-to $$$$(BLOCKSIZE)，故保持一致。
 add = ("\n"
        "  DEVICE_PACKAGES := kmod-ath9k\n"
        "  IMAGES += factory-nor.bin sysupgrade-nor.bin\n"
-       "  IMAGE/factory-nor.bin := append-kernel | pad-to 4096k | append-rootfs | pad-rootfs | check-size 14464k\n"
-       "  IMAGE/sysupgrade-nor.bin := append-kernel | pad-to 4096k | append-rootfs | pad-rootfs | check-size 14464k | append-metadata\n")
+       "  IMAGE/factory-nor.bin := append-kernel | pad-to $$$$(BLOCKSIZE) | append-rootfs | pad-rootfs | check-size 14464k\n"
+       "  IMAGE/sysupgrade-nor.bin := append-kernel | pad-to $$$$(BLOCKSIZE) | append-rootfs | pad-rootfs | check-size 14464k | append-metadata\n")
 new_block = pre + add + post
 # 2) 钉死 breed-factory.bin：pad-to 强制 14528k（防被放大成 28MB）+ check-size 14464k（禁止超 16MiB NOR）
 new_block = re.sub(

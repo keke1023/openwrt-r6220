@@ -224,7 +224,17 @@ jobs:
           cd openwrt
           echo -e "$(nproc) thread compile"
           make -j$(nproc) || make -j1 || make -j1 V=s
-          echo "status=success" >> $GITHUB_OUTPUT
+          # ⚠️ 必须根据真实产物判断成败：之前用 `make ...; echo status=success`（分号）
+          # 会让编译实际失败时仍标记 success，导致后续步骤空跑、Release 无固件却显示绿。
+          # 这里改为：bin/targets 下存在任意 .bin/.img 才算成功，否则标记 failed 并 exit 1
+          # （exit 1 让 job 变红，真实报错直接留在上方 make 日志里可见）。
+          if [ -n "$(find bin/targets -type f \( -name '*.bin' -o -name '*.img' \) 2>/dev/null | head -1)" ]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "!! 未生成任何固件镜像（bin/targets 下无 .bin/.img），编译实际失败"
+            exit 1
+          fi
 
       - name: 整理固件文件
         if: steps.compile.outputs.status == 'success'
