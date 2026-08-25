@@ -21,31 +21,39 @@ sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generat
 #    uboot 需配置为从 SPI 启动。生成的镜像在 bin/targets/ath79/nand/ 下：
 #      *-factory-nor.bin / *-sysupgrade-nor.bin
 NAND_MK="target/linux/ath79/image/nand.mk"
-if [ -f "$NAND_MK" ] && grep -q "define Device/domywifi_dw33d" "$NAND_MK"; then
+if [ -f "$NAND_MK" ] && grep -q "define Device/domywifi_dw33d-nor" "$NAND_MK"; then
   if ! grep -q "factory-nor.bin" "$NAND_MK"; then
-    echo "==> 注入 DW33D SPI NOR 镜像目标 (factory-nor.bin / sysupgrade-nor.bin)"
+    echo "==> 注入 DW33D SPI NOR 镜像目标 (修正：针对 -nor 变体，避免 IMAGES:= 覆盖)"
     python3 - "$NAND_MK" <<'PYEOF'
 import sys, re
 p = sys.argv[1]
 s = open(p, encoding="utf-8").read()
-m = re.search(r"(define Device/domywifi_dw33d\n.*?)(\nendef)", s, re.S)
+# 只匹配 -nor 变体块；之前误匹配基础 domywifi_dw33d(NAND) 导致 -nor 的 IMAGES:= 把它覆盖掉
+m = re.search(r"(define Device/domywifi_dw33d-nor\n.*?)(\nendef)", s, re.S)
 if not m:
-    print("!! dw33d block not found, skip")
+    print("!! dw33d-nor block not found, skip")
     sys.exit(0)
-block = m.group(1)
-if "factory-nor.bin" in block:
+pre, post = m.group(1), m.group(2)
+if "factory-nor.bin" in pre:
     print("already patched, skip")
     sys.exit(0)
+# 1) 在 -nor 变体内追加 NOR 友好镜像（带 check-size 15360k=15MiB，< 16MiB NOR）
+#    同时用 DEVICE_PACKAGES:= 覆盖继承来的 USB 包（纯 SPI 精简版，保留 ath10k 5G）
 add = ("\n"
+       "  DEVICE_PACKAGES := kmod-ath10k-ct ath10k-firmware-qca988x-ct\n"
        "  IMAGES += factory-nor.bin sysupgrade-nor.bin\n"
        "  IMAGE/factory-nor.bin := append-kernel | pad-to 4096k | append-rootfs | pad-rootfs | check-size 15360k\n"
        "  IMAGE/sysupgrade-nor.bin := append-kernel | pad-to 4096k | append-rootfs | pad-rootfs | check-size 15360k | append-metadata\n")
-s = s[:m.end(1)] + add + s[m.end(1):]
-# 剔除 DW33D 设备默认的 USB 包（用户不需要 USB，纯 SPI 精简版）
-s = s.replace("kmod-usb2 kmod-usb-storage kmod-usb-ledtrig-usbport \\\n\t", "")
-s = s.replace("kmod-usb2 kmod-usb-storage kmod-usb-ledtrig-usbport", "")
-open(p, "w", encoding="utf-8").write(s)
-print("patched nand.mk for DW33D SPI")
+new_block = pre + add + post
+# 2) 钉死 breed-factory.bin：pad-to 强制 14528k（防被放大成 28MB）+ check-size 15360k（禁止超 16MiB NOR）
+new_block = re.sub(
+    r"  IMAGE/breed-factory\.bin :=.*?append-okli-kernel \$\(1\)",
+    "  IMAGE/breed-factory.bin := append-kernel | pad-to 64k | append-rootfs | pad-rootfs | prepad-okli-kernel $(1) | pad-to 14528k | append-okli-kernel $(1) | check-size 15360k",
+    new_block, flags=re.S)
+# 3) -nor 的 IMAGE_SIZE 提到 15360k，使默认 sysupgrade.bin 的 check-size 也能放下 ~14.6MiB 内容
+new_block = re.sub(r"IMAGE_SIZE := 14464k", "IMAGE_SIZE := 15360k", new_block)
+open(p, "w", encoding="utf-8").write(s[:m.start()] + new_block + s[m.end():])
+print("patched nand.mk for DW33D SPI (-nor variant)")
 PYEOF
   fi
 fi
