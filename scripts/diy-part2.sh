@@ -135,7 +135,7 @@ define Device/kst_wf3000a
   DEVICE_MODEL := WF3000A
   DEVICE_DTS := mt7981-kst-wf3000a
   DEVICE_DTS_DIR := ../dts
-  DEVICE_PACKAGES := kmod-mt7981-firmware mt7981-wo-firmware
+  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware
   UBINIZE_OPTS := -E 5
   BLOCKSIZE := 128k
   PAGESIZE := 2048
