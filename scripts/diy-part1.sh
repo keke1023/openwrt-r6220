@@ -45,6 +45,21 @@ echo "==> 整库回退 helloworld 到 commit $HELLOWORLD_PIN_COMMIT（xray-core 
 cd package/helloworld
 git checkout "$HELLOWORLD_PIN_COMMIT"
 cd ../..
+
+echo "==> 剥离 shadowsocks-rust（Rust 工具链在 aarch64/filogic 上编译极慢；ssr-plus 用 shadowsocks-libev 版即可，去掉 Rust 不影响 SSR/V2Ray/Xray 单出口，且 kst-wf3000a 等机型不再被拖慢）"
+SSRP_MK="package/helloworld/luci-app-ssr-plus/Makefile"
+if [ -f "$SSRP_MK" ]; then
+  # aarch64 上 INCLUDE_Shadowsocks_Rust_Client 默认 y，并经 select PACKAGE_shadowsocks-rust 强制拽入 Rust；
+  # 光在 seed config 写 =n 关不掉被 select 的选项（defconfig 会翻回），故从源头删掉 select
+  sed -i '/select.*shadowsocks-rust/d' "$SSRP_MK"
+  # 若 DEPENDS 里存在硬依赖 +shadowsocks-rust / +PACKAGE_shadowsocks-rust 也一并删除（保险）
+  sed -i '/+shadowsocks-rust/d' "$SSRP_MK"
+  sed -i '/+PACKAGE_shadowsocks-rust/d' "$SSRP_MK"
+  echo "==> 已剥离 shadowsocks-rust（INCLUDE_Shadowsocks_Rust_*=n 现在才真正生效，aarch64 不再编译 Rust）"
+else
+  echo "!! 未找到 $SSRP_MK，跳过 Rust 剥离（请确认 helloworld 源已就位）"
+fi
+
 # 自检：确认 xray-core 版本与 ssr-plus 存在
 XRAY_VER=$(grep -m1 'PKG_VERSION:=' package/helloworld/xray-core/Makefile 2>/dev/null | cut -d'=' -f2)
 echo "==> xray-core 当前锁定版本：v${XRAY_VER:-未知}"
