@@ -193,3 +193,36 @@ PYEOF
 else
   echo "==> filogic.mk 不存在或已含 kst_wf3000a，跳过 KST 设备注入"
 fi
+
+# ===========================================================================
+# 10) NanoPi R2S 网络接口绑定修正 (rockchip/armv8)
+#     上游默认把 r2s 与 r2c/r4s/r4se 等共享同一行:
+#       ucidef_set_interfaces_lan_wan 'eth1' 'eth0'   => lan=eth1, wan=eth0
+#     用户要求 WAN 绑 eth1(USB RTL8153), LAN 绑 eth0(板载 RTL8211)，恰好相反。
+#     处理：给 r2s 拆出独立 case 分支(只改它)，不动共享行里的 r2c/r4s 等其它设备。
+#     仅在 rockchip 平台(02_network 文件存在)时生效，其它架构整段跳过。
+# ===========================================================================
+R2S_N2="target/linux/rockchip/armv8/base-files/etc/board.d/02_network"
+if [ -f "$R2S_N2" ] && ! grep -q "friendlyarm,nanopi-r2s)" "$R2S_N2"; then
+  echo "==> 修正 NanoPi R2S 网络绑定: WAN=eth1, LAN=eth0"
+  python3 - "$R2S_N2" <<'PYEOF'
+import sys, re
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+# 1) 从共享 case 列表独占移除 r2s 那一行(匹配到行尾，吃掉整行含续行反斜杠，最鲁棒)
+s = re.sub(r"\s*friendlyarm,nanopi-r2s[^\n]*\n", "", s)
+# 2) 在 rockchip_setup_interfaces 的 case "$board" in 之后插入 r2s 独立分支
+anchor = 'case "$board" in\n'
+idx = s.index(anchor) + len(anchor)
+ins = ('\tfriendlyarm,nanopi-r2s)\n'
+       '\t\tucidef_set_interfaces_lan_wan \'eth0\' \'eth1\'\n'
+       '\t\t;;\n')
+s = s[:idx] + ins + s[idx:]
+open(p, "w", encoding="utf-8").write(s)
+print("patched 02_network: r2s lan=eth0 wan=eth1")
+PYEOF
+elif [ -f "$R2S_N2" ]; then
+  echo "==> 02_network 已含 r2s 独立分支，跳过"
+else
+  echo "==> 非 rockchip 平台，跳过 R2S 网络注入"
+fi
