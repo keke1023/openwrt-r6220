@@ -115,3 +115,73 @@ if all_define != all_endef:
     print("!! 若 make 仍报 missing endef 请检查 mt7621.mk；此处不再自杀式中止")
 PYEOF
 fi
+
+# ===========================================================================
+# 9) KST-WF3000A (mt7981b, SPI-NAND, NMBM stock layout) 设备移植注入
+#    仅在 immortalwrt 23.05（含 target/linux/mediatek/image/filogic.mk）时生效；
+#    18.06 等无此文件则整段跳过，不影响其它分支/其它架构。
+#    注入三件套：DTS 文件、filogic.mk 设备定义、board.d/02_network WAN/LAN 分支。
+#    （时机：本脚本在 make defconfig 之前运行，设备定义注入后 defconfig 才能识别到它）
+# ===========================================================================
+FIL="target/linux/mediatek/image/filogic.mk"
+if [ -f "$FIL" ] && ! grep -q "define Device/kst_wf3000a" "$FIL"; then
+  echo "==> 注入 KST-WF3000A 设备定义到 $FIL"
+
+  # --- 9.1 filogic.mk 设备定义（stock NMBM 布局：整片 ubi + KERNEL_IN_UBI）---
+  cat >> "$FIL" <<'MKEOF'
+
+define Device/kst_wf3000a
+  DEVICE_VENDOR := KST
+  DEVICE_MODEL := WF3000A
+  DEVICE_DTS := mt7981-kst-wf3000a
+  DEVICE_DTS_DIR := ../dts
+  DEVICE_PACKAGES := kmod-mt7981-firmware mt7981-wo-firmware
+  UBINIZE_OPTS := -E 5
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  KERNEL_IN_UBI := 1
+  IMAGE_SIZE := 116736k
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+endef
+TARGET_DEVICES += kst_wf3000a
+MKEOF
+
+  # --- 9.2 拷贝 DTS 到源码 dts 目录 ---
+  DTS_SRC="../scripts/mt7981-kst-wf3000a.dts"
+  if [ -f "$DTS_SRC" ]; then
+    echo "==> 拷贝 DTS: $DTS_SRC -> target/linux/mediatek/dts/mt7981-kst-wf3000a.dts"
+    cp "$DTS_SRC" "target/linux/mediatek/dts/mt7981-kst-wf3000a.dts"
+  else
+    echo "!! 警告: 未找到 $DTS_SRC，KST-WF3000A 将无法编译（DTS 缺失）"
+  fi
+
+  # --- 9.3 注入 board.d/02_network：WAN/LAN 分支（定位真实文件，避免路径硬编码）---
+  N2=$(ls target/linux/mediatek/*/base-files/etc/board.d/02_network \
+           target/linux/mediatek/base-files/etc/board.d/02_network 2>/dev/null | head -1)
+  if [ -n "$N2" ] && ! grep -q "kst,wf3000a)" "$N2"; then
+    echo "==> 注入 02_network WAN/LAN 分支到 $N2"
+    python3 - "$N2" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+case = ('\n'
+        '\tkst,wf3000a)\n'
+        '\t\tucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "wan"\n'
+        '\t\t;;\n')
+# 插入到标准 board.d 结构里最后一个 esac 之前；找不到 esac 则兜底整体追加
+idx = s.rfind('\nesac')
+if idx == -1:
+    idx = s.rfind('esac')
+if idx == -1:
+    s = s.rstrip() + case
+else:
+    s = s[:idx] + case + s[idx:]
+open(p, "w", encoding="utf-8").write(s)
+print("patched 02_network for kst,wf3000a")
+PYEOF
+  else
+    echo "==> 02_network 未找到或已含 kst,wf3000a，跳过网络分支注入"
+  fi
+else
+  echo "==> filogic.mk 不存在或已含 kst_wf3000a，跳过 KST 设备注入"
+fi
