@@ -228,7 +228,9 @@ jobs:
           # 会让编译实际失败时仍标记 success，导致后续步骤空跑、Release 无固件却显示绿。
           # 这里改为：bin/targets 下存在任意 .bin/.img 才算成功，否则标记 failed 并 exit 1
           # （exit 1 让 job 变红，真实报错直接留在上方 make 日志里可见）。
-          if [ -n "$(find bin/targets -type f \( -name '*.bin' -o -name '*.img' \) 2>/dev/null | head -1)" ]; then
+          # rockchip 等平台的 SD 卡镜像扩展名为 .img.gz（其它平台为 .bin/.img），
+          # 必须把 *.img.gz 也纳入判定，否则固件实际已生成却会被误判为失败
+          if [ -n "$(find bin/targets -type f \( -name '*.bin' -o -name '*.img' -o -name '*.img.gz' \) 2>/dev/null | head -1)" ]; then
             echo "status=success" >> "$GITHUB_OUTPUT"
           else
             echo "status=failed" >> "$GITHUB_OUTPUT"
