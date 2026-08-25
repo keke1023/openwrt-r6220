@@ -226,3 +226,86 @@ elif [ -f "$R2S_N2" ]; then
 else
   echo "==> 非 rockchip 平台，跳过 R2S 网络注入"
 fi
+
+# ===========================================================================
+# 11) Qihoo 360T6GS (mt7621, NAND, 128MB) 设备移植注入
+#     仅在 immortalwrt 23.05（target/linux/ramips/image/mt7621.mk 存在）时生效；
+#     18.06 等无此文件则整段跳过，不影响其它分支/架构。
+#     注入三件套：DTS、mt7621.mk 设备定义、board.d/02_network 的 interfaces/macs 分支。
+#     上游源码：ByteArray0/openwrt-device-expand @9af7bb9（ramips/mt7621，23.05 兼容：
+#     DTS 用 nvmem-layout/fixed-layout 风格，已比对 jdcloud_re-sp-01b 确认兼容；
+#     mt7915 驱动由 DEVICE_PACKAGES 的 kmod-mt7915-firmware(DEPENDS kmod-mt7915e) 自动带）
+# ===========================================================================
+RAMIPS_MK="target/linux/ramips/image/mt7621.mk"
+if [ -f "$RAMIPS_MK" ] && ! grep -q "define Device/qihoo_360t6gs" "$RAMIPS_MK"; then
+  echo "==> 注入 Qihoo 360T6GS 设备定义到 $RAMIPS_MK"
+
+  # --- 11.1 mt7621.mk 设备定义（NAND + uimage-lzma-loader，append-ubi 固件）---
+  cat >> "$RAMIPS_MK" <<'MKEOF'
+
+define Device/qihoo_360t6gs
+  $(Device/nand)
+  $(Device/uimage-lzma-loader)
+  DEVICE_VENDOR := Qihoo
+  DEVICE_MODEL := 360T6GS
+  DEVICE_DTS := mt7621_qihoo_360t6gs
+  DEVICE_DTS_DIR := ../dts
+  IMAGE_SIZE := 128512k
+  IMAGES += firmware.bin
+  IMAGE/firmware.bin := append-kernel | pad-to $$(KERNEL_SIZE) | append-ubi | \
+	check-size
+  DEVICE_PACKAGES += kmod-mt7915-firmware
+endef
+TARGET_DEVICES += qihoo_360t6gs
+MKEOF
+
+  # --- 11.2 拷贝 DTS 到源码 dts 目录 ---
+  DTS_SRC="../scripts/mt7621-qihoo-360t6gs.dts"
+  if [ -f "$DTS_SRC" ]; then
+    echo "==> 拷贝 DTS: $DTS_SRC -> target/linux/ramips/dts/mt7621_qihoo_360t6gs.dts"
+    cp "$DTS_SRC" "target/linux/ramips/dts/mt7621_qihoo_360t6gs.dts"
+  else
+    echo "!! 警告: 未找到 $DTS_SRC，360T6GS 将无法编译（DTS 缺失）"
+  fi
+
+  # --- 11.3 注入 board.d/02_network：interfaces + macs 分支 ---
+  N2=$(ls target/linux/ramips/*/base-files/etc/board.d/02_network 2>/dev/null | head -1)
+  if [ -n "$N2" ] && ! grep -q "qihoo,360t6gs)" "$N2"; then
+    echo "==> 注入 02_network 分支到 $N2"
+    python3 - "$N2" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+
+def ins_at(func):
+    # 在 func() 内的第一个 'case $board in' 之后插入（首个匹配优先，避免被 * 默认分支吃掉）
+    i = s.index(func + "()")
+    ci = s.index('case $board in', i)
+    return ci + len('case $board in\n')
+
+iface = ('\tqihoo,360t6gs)\n'
+        '\t\tucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "wan"\n'
+        '\t\t;;\n')
+macs = ('\tqihoo,360t6gs)\n'
+        '\t\tlan_mac=$(cat /sys/class/net/eth0/address)\n'
+        '\t\twan_mac=$(macaddr_add "$lan_mac" 1)\n'
+        '\t\tlabel_mac=$wan_mac\n'
+        '\t\t;;\n')
+ai = ins_at('ramips_setup_interfaces')
+am = ins_at('ramips_setup_macs')
+# 先插索引较大的（macs 在后），再插较小的（interfaces），避免位置偏移
+if am > ai:
+    s = s[:am] + macs + s[am:]
+    s = s[:ai] + iface + s[ai:]
+else:
+    s = s[:ai] + iface + s[ai:]
+    s = s[:am] + macs + s[am:]
+open(p, "w", encoding="utf-8").write(s)
+print("patched 02_network for qihoo,360t6gs (interfaces + macs)")
+PYEOF
+  else
+    echo "==> 02_network 未找到或已含 qihoo,360t6gs，跳过网络分支注入"
+  fi
+else
+  echo "==> mt7621.mk 不存在或已含 qihoo_360t6gs，跳过 360T6GS 设备注入"
+fi
