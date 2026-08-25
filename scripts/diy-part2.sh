@@ -38,9 +38,9 @@ if "factory-nor.bin" in pre:
     print("already patched, skip")
     sys.exit(0)
 # 1) 在 -nor 变体内追加 NOR 友好镜像（带 check-size 14464k=15MiB，< 16MiB NOR）
-#    同时用 DEVICE_PACKAGES:= 覆盖继承来的 USB 包（纯 SPI 精简版，保留 ath10k 5G）
+#    同时用 DEVICE_PACKAGES:= 覆盖继承来的 USB 包与 ath10k 5G（纯 SPI 精简版，砍掉 ath10k 5G 省空间，仅保留 2.4G ath9k）
 add = ("\n"
-       "  DEVICE_PACKAGES := kmod-ath10k-ct ath10k-firmware-qca988x-ct\n"
+       "  DEVICE_PACKAGES := kmod-ath9k\n"
        "  IMAGES += factory-nor.bin sysupgrade-nor.bin\n"
        "  IMAGE/factory-nor.bin := append-kernel | pad-to 4096k | append-rootfs | pad-rootfs | check-size 14464k\n"
        "  IMAGE/sysupgrade-nor.bin := append-kernel | pad-to 4096k | append-rootfs | pad-rootfs | check-size 14464k | append-metadata\n")
