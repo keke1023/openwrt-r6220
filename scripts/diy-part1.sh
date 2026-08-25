@@ -25,17 +25,18 @@ esac
 #   - 18.06-k5.4：整体 checkout 到 coolsnowwolf 2024-09-13 的 commit
 #       24a191cedb8ce45dc07343544a78ef2369c68098（即 "xray-core: update to 1.8.24"），
 #       ssr-plus 停在 188、xray-core 停在 v1.8.24，适配老内核 + 小闪存。
-#   - 23.05 / master：用 helloworld 最新 master（ssr-plus 升到最新 >188，xray-core 也升
-#       最新 v26.x）。23.05 的 16MB SPI NOR 机型(dw33d-spi)已移除，23.05 仅剩装得下最新
-#       xray 的大闪存机型（dw33d NAND 128MB / kst / cmcc_a10 / rax3000m / r2s 等）。
+#   - 23.05 / master：用 helloworld 的 master 分支（非默认 dev 分支）。fw876/helloworld 的
+#       DEFAULT 分支是 dev（ssr-plus 196-7），但用户要的是 master 分支（ssr-plus 190-3）。
+#       clone 必须显式 -b master，否则会误拉 dev。xray-core 随 master 走（v25/v26，Go 1.26）。
 # 全量 clone（非浅克隆）：后续 18.06 需 git checkout 历史 commit，浅克隆不可靠。
 # ---------------------------------------------------------------------------
 HELLOWORLD_PIN_COMMIT="24a191cedb8ce45dc07343544a78ef2369c68098"
 
 echo "==> 添加 luci-app-ssr-plus 源（fw876/helloworld，clone 到 package/helloworld）"
 rm -rf package/helloworld
-# 全量 clone：后续 checkout 历史 commit 需要完整历史。
-git clone https://github.com/fw876/helloworld.git package/helloworld
+# 全量 clone，并显式 -b master：fw876/helloworld 的 DEFAULT 分支是 dev（ssr-plus 196-7），
+# 不指定分支会误拉 dev，必须用 -b master 拿 ssr-plus 190-3 的版本。
+git clone -b master https://github.com/fw876/helloworld.git package/helloworld
 if [ ! -d "package/helloworld/luci-app-ssr-plus" ]; then
   echo "!! 错误：helloworld clone 未包含 luci-app-ssr-plus，请检查网络/源可用性"
   exit 1
@@ -49,8 +50,8 @@ case "$SRC_BRANCH" in
     git checkout "$HELLOWORLD_PIN_COMMIT"
     ;;
   *)
-    echo "==> 23.05/master：用 helloworld 最新 master（ssr-plus + xray 均最新；Rust 已在下方剥离）"
-    # 不 checkout：clone 默认拉的就是 master 最新，整库采用最新源码
+    echo "==> 23.05/master：用 helloworld master 分支（ssr-plus 190-3；Rust 已在下方剥离）"
+    # clone 已显式 -b master 拉取 master 分支，无需再 checkout；整库采用 master 源码
     ;;
 esac
 cd ../..
