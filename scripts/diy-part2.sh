@@ -174,23 +174,22 @@ MKEOF
   if [ -n "$N2" ] && ! grep -q "kst,wf3000a)" "$N2"; then
     echo "==> 注入 02_network WAN/LAN 分支到 $N2"
     python3 - "$N2" <<'PYEOF'
-import sys
+import sys, re
 p = sys.argv[1]
 s = open(p, encoding="utf-8").read()
 case = ('\n'
         '\tkst,wf3000a)\n'
         '\t\tucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "wan"\n'
         '\t\t;;\n')
-# 插入到标准 board.d 结构里最后一个 esac 之前；找不到 esac 则兜底整体追加
-idx = s.rfind('\nesac')
-if idx == -1:
-    idx = s.rfind('esac')
-if idx == -1:
-    s = s.rstrip() + case
-else:
-    s = s[:idx] + case + s[idx:]
+# 关键：接口分配必须写进 mediatek_setup_interfaces()，且在 '*' 默认分支之前。
+# 否则会命中 '*' 兜底（lan1 lan2 lan3 lan4）并叠加，导致多出一个不存在的 lan4、且端口重复。
+# 先清除任何已存在的 kst 块（避免重复或错插到 macs 函数）。
+s = re.sub(r'\n\tkst,wf3000a\)\n(?:\t\t[^\n]*\n)*\t\t;;\n', '\n', s)
+fn = s.index('mediatek_setup_interfaces()')
+star = s.index('\t*)', fn)
+s = s[:star] + case + s[star:]
 open(p, "w", encoding="utf-8").write(s)
-print("patched 02_network for kst,wf3000a")
+print("patched 02_network (interfaces case, before '*') for kst,wf3000a")
 PYEOF
   else
     echo "==> 02_network 未找到或已含 kst,wf3000a，跳过网络分支注入"
