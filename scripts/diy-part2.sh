@@ -259,8 +259,7 @@ define Device/qihoo_360t6gs
   DEVICE_DTS_DIR := ../dts
   IMAGE_SIZE := 128512k
   IMAGES += firmware.bin
-  IMAGE/firmware.bin := append-kernel | pad-to $$(KERNEL_SIZE) | append-ubi | \
-	check-size
+  IMAGE/firmware.bin := append-kernel | pad-to $$(KERNEL_SIZE) | append-ubi | check-size
   DEVICE_PACKAGES += kmod-mt7915-firmware
 endef
 TARGET_DEVICES += qihoo_360t6gs
@@ -315,4 +314,37 @@ PYEOF
   fi
 else
   echo "==> mt7621.mk 不存在或已含 qihoo_360t6gs，跳过 360T6GS 设备注入"
+fi
+
+# ===========================================================================
+# 12) mt7621.mk 语法自检（只读诊断：捕获 "recipe commences before first target" 的两类根因）
+#     ① define/endef 未配对；② 续行反斜杠 \ 后紧跟 define/endef/空行(悬挂续行)，
+#     会使后续 define 被误判为 recipe。并把 200-260 行打印到日志，便于云端排错。
+# ===========================================================================
+if [ -f "$RAMIPS_MK" ]; then
+  echo "==> [自检] mt7621.mk 语法校验"
+  python3 - "$RAMIPS_MK" <<'PYEOF'
+import sys, re
+p = sys.argv[1]
+lines = open(p, encoding="utf-8").read().split("\n")
+depth = 0
+for i, l in enumerate(lines, 1):
+    if re.match(r'^define ', l):
+        depth += 1
+    elif l == 'endef':
+        depth -= 1
+        if depth < 0:
+            print("!! 第 %d 行 endef 多余（define/endef 不匹配）" % i)
+    if l.rstrip().endswith('\\'):
+        nxt = lines[i] if i < len(lines) else ''
+        if nxt.strip().startswith(('define', 'endef')) or nxt.strip() == '':
+            print("!! 第 %d 行悬挂续行反斜杠 -> 下一行 %r" % (i, nxt))
+if depth != 0:
+    print("!! define/endef 最终未配对: 差 %d" % depth)
+else:
+    print("OK: define/endef 配对平衡 (%d 对)" % depth)
+print("=== mt7621.mk 第 200-260 行（排错用）===")
+for i in range(199, min(260, len(lines))):
+    print("%d: %r" % (i+1, lines[i]))
+PYEOF
 fi
