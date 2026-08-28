@@ -94,6 +94,10 @@ def remove_pkg(ln, pkg):
     # 清掉行尾可能残留的孤立续行反斜杠
     return ln.rstrip().rstrip("\\").rstrip()
 
+# 续行安全：先把块内以 \ 结尾的续行合并成逻辑单行，再删包，避免留下悬挂 TAB 行。
+# 旧实现逐行删包：若 "DEVICE_PACKAGES := usb-pkg \" 在续行上一行、保留包在下一行，
+# 删 usb 后上一行变空被丢弃、下一行残留 TAB 包 -> eval 时报
+# "recipe commences before first target"（正是 Makefile:234 那类错）。
 for dev, pkgs in jobs:
     key = "define Device/%s" % dev
     if key not in s:
@@ -107,15 +111,24 @@ for dev, pkgs in jobs:
             end = i; break
     if start < 0 or end < 0:
         print("  (skip %s: 块边界未找到)" % dev); continue
-    out = []
+    # 1) 合并续行：把以 \ 结尾的行的下一行并入（去掉上一行尾部 \，拼接本行内容）
+    buf = []
     for j in range(start, end):
         ln = lines[j]
+        if buf and buf[-1].rstrip().endswith("\\"):
+            prev = buf[-1].rstrip()[:-1].rstrip()
+            buf[-1] = prev + " " + ln.strip()
+        else:
+            buf.append(ln)
+    # 2) 在逻辑单行上删包，丢弃变空的行（不再产生悬挂 TAB 行）
+    out = []
+    for ln in buf:
+        new = ln
         for pkg in pkgs:
-            ln = remove_pkg(ln, pkg)
-        # 丢弃被清空/变空白的行（含孤立续行、纯空白、空 DEVICE_PACKAGES 赋值）
-        if ln.strip() in ("", "\t", "\\", "DEVICE_PACKAGES", "DEVICE_PACKAGES :="):
+            new = remove_pkg(new, pkg)
+        if new.strip() in ("", "\t", "\\", "DEVICE_PACKAGES", "DEVICE_PACKAGES :="):
             continue
-        out.append(ln)
+        out.append(new)
     lines[start:end] = out
     s = "\n".join(lines)
     print("  patched %s: 移除 %s" % (dev, ", ".join(pkgs)))
