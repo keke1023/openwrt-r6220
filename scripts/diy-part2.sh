@@ -377,44 +377,39 @@ MSG_DTS="target/linux/ramips/dts/mt7621_raisecom_msg1500-x-00.dts"
 if [ -f "$MSG_DTS" ] && ! grep -q "eeprom_factory_0" "$MSG_DTS"; then
   echo "==> 修复 MSG1500 X.00 MT7615 5G eeprom 读取（nvmem + 完整 0x4da8 大小）"
   python3 - "$MSG_DTS" <<'PYEOF'
-import re, sys
+import sys
 p = sys.argv[1]
 s = open(p, encoding="utf-8").read()
 
-# 1) factory 分区：nvmem-cells(旧) -> nvmem-layout/fixed-layout + eeprom@0(0x4da8)
-old = re.compile(
-    r'compatible\s*=\s*"nvmem-cells";'
-    r'\s*#address-cells\s*=\s*<1>;'
-    r'\s*#size-cells\s*=\s*<1>;'
-    r'\s*macaddr_factory_4:\s*macaddr@4\s*\{'
-    r'\s*reg\s*=\s*<0x4 0x6>;'
-    r'\s*\};', re.S)
-new = (
-    'nvmem-layout {\n'
-    '\t\t\t\tcompatible = "fixed-layout";\n'
-    '\t\t\t\t#address-cells = <1>;\n'
-    '\t\t\t\t#size-cells = <1>;\n'
+# 1) factory 分区：保留 5.15 原生 compatible="nvmem-cells"，仅新增 eeprom@0 子节点
+#    （完整 0x4da8 大小）。不引入 nvmem-layout/fixed-layout（那是 6.x 内核写法，5.15 不支持）。
+anchor = '\t\tmacaddr_factory_4: macaddr@4 {'
+eeprom_cell = (
+    '\t\teeprom_factory_0: eeprom@0 {\n'
+    '\t\t\treg = <0x0 0x4da8>;\n'
+    '\t\t};\n'
     '\n'
-    '\t\t\t\teeprom_factory_0: eeprom@0 {\n'
-    '\t\t\t\t\treg = <0x0 0x4da8>;\n'
-    '\t\t\t\t};\n'
-    '\n'
-    '\t\t\t\tmacaddr_factory_4: macaddr@4 {\n'
-    '\t\t\t\t\treg = <0x4 0x6>;\n'
-    '\t\t\t\t};\n'
-    '\t\t\t}'
 )
-s, n = old.subn(new, s)
-print("factory nvmem-layout replaced:", n)
+if anchor in s:
+    s = s.replace(anchor, eeprom_cell + anchor, 1)
+    print("factory: 已插入 eeprom@0(0x4da8) 子节点")
+else:
+    print("!! 警告: factory macaddr 节点未找到，跳过 eeprom 子节点插入")
 
-# 2) pcie0 wifi 节点：移除旧 mediatek,mtd-eeprom，改用 nvmem eeprom 单元
+# 2) pcie0 wifi 节点：移除旧 mediatek,mtd-eeprom（MTD 路径只按 MT7615_EEPROM_SIZE 读，
+#    5G 校准段被截断 -> 5G 限到 6~7dBm），改用 nvmem "eeprom" 单元（驱动 5.15 支持，
+#    mt76_get_of_data_from_nvmem 按 cell 大小 0x4da8 读全量校准）。
 s = s.replace('\t\tmediatek,mtd-eeprom = <&factory 0x0>;\n', '')
-s = s.replace(
-    '\t\tnvmem-cells = <&macaddr_factory_4>;\n\t\tnvmem-cell-names = "mac-address";',
-    '\t\tnvmem-cells = <&eeprom_factory_0>, <&macaddr_factory_4>;\n\t\tnvmem-cell-names = "eeprom", "mac-address";')
+old_nvmem = '\t\tnvmem-cells = <&macaddr_factory_4>;\n\t\tnvmem-cell-names = "mac-address";'
+new_nvmem = '\t\tnvmem-cells = <&eeprom_factory_0>, <&macaddr_factory_4>;\n\t\tnvmem-cell-names = "eeprom", "mac-address";'
+if old_nvmem in s:
+    s = s.replace(old_nvmem, new_nvmem)
+    print("pcie0 wifi: 已切换为 nvmem eeprom+mac-address 单元")
+else:
+    print("!! 警告: wifi nvmem-cells 旧串未找到，未修改（请检查 DTS 缩进）")
 
 open(p, "w", encoding="utf-8").write(s)
-print("MSG1500 DTS patched for 5G eeprom")
+print("MSG1500 DTS patched for 5G eeprom (nvmem-cells, 0x4da8)")
 PYEOF
 elif [ -f "$MSG_DTS" ]; then
   echo "==> MSG1500 DTS 已含 eeprom_factory_0，跳过 5G 修复"
