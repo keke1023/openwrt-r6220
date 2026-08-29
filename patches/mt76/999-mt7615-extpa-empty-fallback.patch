@@ -1,0 +1,51 @@
+From: OpenWrt build <builder@openwrt.local>
+Subject: [mt76] mt7615: fall back to normal target-power table when EXT_PA eeprom region is empty
+
+On boards whose factory eeprom clears the TSSI bit (e.g. RAISECOM MSG1500
+X.00, MT7615DN DBDC) the driver takes the "external PA" branch and reads the
+5G/2.4G target power from MT_EE_EXT_PA_*_TARGET_POWER. When that region is
+left uncalibrated (all zeros, as shipped on this device) the TX power
+collapses to the firmware floor (~7 dBm) even though the real calibration
+lives in the normal MT_EE_TX0_5G_G0_TARGET_POWER area (0x070, = 23 dBm).
+
+Fall back to the normal target-power table whenever the EXT_PA region is
+empty, so affected boards get their proper TX power instead of the floor.
+
+--- a/mt7615/eeprom.h
++++ b/mt7615/eeprom.h
+@@ -105,10 +105,28 @@ mt7615_ext_pa_enabled(struct mt7615_dev *
+ static inline bool
+ mt7615_ext_pa_enabled(struct mt7615_dev *dev, enum nl80211_band band)
+ {
+-	u8 *eep = dev->mt76.eeprom.data;
++	u8 *eep = dev->mt76.eeprom.data;
++	u8 off, tssi_bit;
++	bool enabled;
+ 
+-	if (band == NL80211_BAND_5GHZ)
+-		return !(eep[MT_EE_NIC_CONF_1 + 1] & MT_EE_NIC_CONF_TSSI_5G);
+-	else
+-		return !(eep[MT_EE_NIC_CONF_1 + 1] & MT_EE_NIC_CONF_TSSI_2G);
++	if (band == NL80211_BAND_5GHZ) {
++		tssi_bit = MT_EE_NIC_CONF_TSSI_5G;
++		off = MT_EE_EXT_PA_5G_TARGET_POWER;
++	} else {
++		tssi_bit = MT_EE_NIC_CONF_TSSI_2G;
++		off = MT_EE_EXT_PA_2G_TARGET_POWER;
++	}
++
++	enabled = !(eep[MT_EE_NIC_CONF_1 + 1] & tssi_bit);
++	/*
++	 * Fall back to the normal target-power table when the EXT_PA
++	 * region is left uncalibrated (all zeros). Otherwise 5G/2G TX
++	 * power collapses to the firmware floor (~7 dBm) on boards whose
++	 * factory eeprom clears the TSSI bit but leaves EXT_PA empty
++	 * (e.g. RAISECOM MSG1500 X.00).
++	 */
++	if (enabled && eep[off] == 0)
++		enabled = false;
++
++	return enabled;
+ }
+ 
+ #endif

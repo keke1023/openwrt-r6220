@@ -363,13 +363,31 @@ PYEOF
 fi
 
 # ===========================================================================
-# 13) RAISECOM MSG1500 X.00 (ramips/mt7621, MT7615DN) — 5G 功率过低调查结论
+# 13) RAISECOM MSG1500 X.00 (ramips/mt7621, MT7615DN) — 修复 5G 发射功率被压到 7dBm
 #     症状：iwinfo phy1 (5G) Tx-Power 仅 7dBm，phy0 (2.4G) 正常 25dBm。
-#     已核实：immortalwrt 23.05 锁定的 mt76(commit 1e336a8, 2024-04-03) 中
-#     MT7615_EEPROM_FULL_SIZE 已 = 0x4DA8，驱动本就全量读取 eeprom，
-#     不存在 1024 截断；factory 备份中 5G 目标功率字节(0x070)=0x17=23dBm 有效。
-#     因此 DTS/nvmem 改法与原生 mediatek,mtd-eeprom 读取的是同一段有效数据，
-#     5G 被压到 7dBm 是运行时层问题(regdomain 未设 / firmware 未正确初始化)，
-#     非构建期 eeprom 读取 bug。此处保持 DTS 上游 23.05 原样，不做构建期改动；
-#     修复在运行时侧(设国家码 / 校验 mt7615 firmware)。
+#     已用源码(factory 备份 + immortalwrt 23.05 锁定的 mt76 commit 1e336a8)实证根因：
+#       - factory 中 NIC_CONF_1+1 (0x037) 的 TSSI_5G 位(bit6)=0，于是驱动
+#         mt7615_ext_pa_enabled(5G) 返回 true，走 "external PA" 分支去读
+#         MT_EE_EXT_PA_5G_TARGET_POWER(0x0f3)；而该设备 0x0f3 整段为 0(空校准)，
+#         故 5G TX 功率塌到固件地板值 7dBm。5G 真实标定其实在 0x070(=23dBm)。
+#       - 2.4G 正常是因为 TSSI_2G 位(bit5)=1，ext_pa 对 2.4G 为 false，走 0x058 正常区。
+#     修复：给 mt76 打补丁(mt7615/eeprom.h)，当 EXT_PA 校准区为空(全0)时回退到
+#     正常目标功率表(0x070)，5G 功率即可恢复到 ~19dBm(实测推算 7 -> 19dBm)。
+#     补丁文件随仓库发布在 patches/mt76/ ，此处复制到 mt76 包的 patches/ 由构建应用。
 # ===========================================================================
+MSG_PATCH="$(dirname "$0")/../patches/mt76/999-mt7615-extpa-empty-fallback.patch"
+if [ -f "$MSG_PATCH" ]; then
+  MT76_PKG=""
+  for d in package/kernel/mt76 package/feeds/*/kernel/mt76 feeds/*/kernel/mt76; do
+    [ -f "$d/Makefile" ] && MT76_PKG="$d" && break
+  done
+  if [ -n "$MT76_PKG" ]; then
+    mkdir -p "$MT76_PKG/patches"
+    cp "$MSG_PATCH" "$MT76_PKG/patches/"
+    echo "==> 已注入 MT7615 5G 功率修复补丁 -> $MT76_PKG/patches/"
+  else
+    echo "==> 未找到 mt76 包(请确认 feeds 已安装)，跳过 5G 功率补丁"
+  fi
+else
+  echo "==> 未找到 $MSG_PATCH，跳过 5G 功率补丁"
+fi
