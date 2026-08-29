@@ -1,0 +1,29 @@
+From 90241462ed9e80080203f2231c753434b6d86469 Mon Sep 17 00:00:00 2001
+From: Ritaro Takenaka <ritarot634@gmail.com>
+Date: Mon, 3 Jan 2022 16:47:00 +0900
+Subject: [PATCH] disable pre calib
+
+MT7615 在部分出厂 eeprom（flash 预校准 / precal）数据不完整或被改写后，
+驱动仍套用无效的 TX DPD / RX 校准，导致 5G TX 的 EVM 恶化，客户端被迫
+掉到极低 MCS，下载（路由器 TX 方向）速率被压到 ~20Mbps，而闭源驱动可到
+~300Mbps（mt76/issues#880）。清掉 MT_EE_CALDATA_FLASH 低 5 位，强制驱动
+放弃 flash 预校准、改走运行时在线校准即可恢复。本机走 flash_eeprom 分支，
+该补丁必然生效。
+---
+ mt7615/eeprom.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/mt7615/eeprom.c b/mt7615/eeprom.c
+--- a/mt7615/eeprom.c
++++ b/mt7615/eeprom.c
+@@ -340,6 +340,8 @@ int mt7615_eeprom_init(struct mt7615_dev
+ 	} else {
+ 		dev->flash_eeprom = true;
+ 		mt7615_cal_free_data(dev);
++		((u8 *)dev->mt76.eeprom.data)[MT_EE_CALDATA_FLASH] &= ~GENMASK(4, 0);
++		dev_info(dev->mt76.dev, "enabling online calibration");
+ 	}
+ 
+ 	mt7615_eeprom_parse_hw_cap(dev);
+-- 
+2.30.2

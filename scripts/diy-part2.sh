@@ -363,31 +363,48 @@ PYEOF
 fi
 
 # ===========================================================================
-# 13) RAISECOM MSG1500 X.00 (ramips/mt7621, MT7615DN) — 修复 5G 发射功率被压到 7dBm
-#     症状：iwinfo phy1 (5G) Tx-Power 仅 7dBm，phy0 (2.4G) 正常 25dBm。
+# 13) RAISECOM MSG1500 X.00 (ramips/mt7621, MT7615DN) — 5G 发射功率 + 吞吐双修复
 #     已用源码(factory 备份 + immortalwrt 23.05 锁定的 mt76 commit 1e336a8)实证根因：
-#       - factory 中 NIC_CONF_1+1 (0x037) 的 TSSI_5G 位(bit6)=0，于是驱动
-#         mt7615_ext_pa_enabled(5G) 返回 true，走 "external PA" 分支去读
+#
+#     (a) 999-mt7615-extpa-empty-fallback.patch —— 修复 5G 功率被压到 7dBm
+#         factory 中 NIC_CONF_1+1 (0x037) 的 TSSI_5G 位(bit6)=0 → 驱动
+#         mt7615_ext_pa_enabled(5G) 返回 true → 走 "external PA" 分支去读
 #         MT_EE_EXT_PA_5G_TARGET_POWER(0x0f3)；而该设备 0x0f3 整段为 0(空校准)，
-#         故 5G TX 功率塌到固件地板值 7dBm。5G 真实标定其实在 0x070(=23dBm)。
-#       - 2.4G 正常是因为 TSSI_2G 位(bit5)=1，ext_pa 对 2.4G 为 false，走 0x058 正常区。
-#     修复：给 mt76 打补丁(mt7615/eeprom.h)，当 EXT_PA 校准区为空(全0)时回退到
-#     正常目标功率表(0x070)，5G 功率即可恢复到 ~19dBm(实测推算 7 -> 19dBm)。
-#     补丁文件随仓库发布在 patches/mt76/ ，此处复制到 mt76 包的 patches/ 由构建应用。
+#         5G TX 功率塌到固件地板值 7dBm。补丁在 EXT_PA 校准区为空(全0)时回退到
+#         正常目标功率表(0x070=23dBm)，5G 功率恢复到 ~18-19dBm。
+#
+#     (b) 998-mt7615-disable-precal.patch —— 修复 5G 吞吐卡 ~20Mbps(mt76/issues#880)
+#         本机 factory 的 5G 预校准(precal)数据不完整/被改写，驱动套用无效 TX DPD/RX
+#         校准 → 5G TX 的 EVM 恶化 → 客户端掉到极低 MCS → 下载(路由器 TX)卡 20Mbps；
+#         闭源驱动能到 ~300Mbps 正是因它不走这套坏 precal。补丁清掉 MT_EE_CALDATA_FLASH
+#         低5位，强制驱动放弃 flash 预校准、改走运行时在线校准。本机走 flash_eeprom 分支，
+#         该补丁必然生效。两补丁协同：999 解决"功率够不够"，998 解决"信号干不干净"。
+#
+#     补丁文件随仓库发布在 patches/mt76/ ，此处把该目录全部 *.patch 复制到 mt76 包的
+#     patches/ 由构建期应用(loop 拷贝，后续加补丁只丢文件即可，无需改本段)。
 # ===========================================================================
-MSG_PATCH="$(dirname "$0")/../patches/mt76/999-mt7615-extpa-empty-fallback.patch"
-if [ -f "$MSG_PATCH" ]; then
+MSG_PATCH_DIR="$(dirname "$0")/../patches/mt76"
+if [ -d "$MSG_PATCH_DIR" ]; then
   MT76_PKG=""
   for d in package/kernel/mt76 package/feeds/*/kernel/mt76 feeds/*/kernel/mt76; do
     [ -f "$d/Makefile" ] && MT76_PKG="$d" && break
   done
   if [ -n "$MT76_PKG" ]; then
     mkdir -p "$MT76_PKG/patches"
-    cp "$MSG_PATCH" "$MT76_PKG/patches/"
-    echo "==> 已注入 MT7615 5G 功率修复补丁 -> $MT76_PKG/patches/"
+    cnt=0
+    for p in "$MSG_PATCH_DIR"/*.patch; do
+      [ -f "$p" ] || continue
+      cp "$p" "$MT76_PKG/patches/"
+      cnt=$((cnt+1))
+    done
+    if [ "$cnt" -gt 0 ]; then
+      echo "==> 已注入 MT7615 修复补丁($cnt 个) -> $MT76_PKG/patches/"
+    else
+      echo "==> $MSG_PATCH_DIR 下无 *.patch，跳过 MT7615 补丁"
+    fi
   else
-    echo "==> 未找到 mt76 包(请确认 feeds 已安装)，跳过 5G 功率补丁"
+    echo "==> 未找到 mt76 包(请确认 feeds 已安装)，跳过 MT7615 补丁"
   fi
 else
-  echo "==> 未找到 $MSG_PATCH，跳过 5G 功率补丁"
+  echo "==> 未找到 $MSG_PATCH_DIR，跳过 MT7615 补丁"
 fi
