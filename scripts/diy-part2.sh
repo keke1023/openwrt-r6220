@@ -361,3 +361,63 @@ for i in range(199, min(260, len(lines))):
     print("%d: %r" % (i+1, lines[i]))
 PYEOF
 fi
+
+# ===========================================================================
+# 13) RAISECOM MSG1500 X.00 (ramips/mt7621, MT7615DN) — 修复 5G 发射功率被压到 6~7dBm
+#     症状：iwinfo phy1 (5G) Tx-Power 仅 7dBm，phy0 (2.4G) 正常 25dBm。
+#     根因：immortalwrt 23.05 的 DTS 用旧绑定 mediatek,mtd-eeprom = <&factory 0x0>，
+#     该路径下 mt76 仅按 MT7615_EEPROM_SIZE(0x1000) 读 eeprom，5G 校准段
+#     (target power / DPD, 位于 0x1000 之后) 被截断 → 5G fallback 到 6~7dBm。
+#     上游 OpenWrt master 已改为 nvmem 方式并显式指定 eeprom 大小 reg = <0x0 0x4da8>，
+#     完整读入后 5G 功率恢复正常(实测 23~25dBm)。本仓库 23.05 = 5.15 内核，
+#     mt76 支持 nvmem "eeprom" 单元，故直接套用上游写法。
+#     仅在目标 DTS 存在时生效，其它架构/设备整段跳过。
+# ===========================================================================
+MSG_DTS="target/linux/ramips/dts/mt7621_raisecom_msg1500-x-00.dts"
+if [ -f "$MSG_DTS" ] && ! grep -q "eeprom_factory_0" "$MSG_DTS"; then
+  echo "==> 修复 MSG1500 X.00 MT7615 5G eeprom 读取（nvmem + 完整 0x4da8 大小）"
+  python3 - "$MSG_DTS" <<'PYEOF'
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+
+# 1) factory 分区：nvmem-cells(旧) -> nvmem-layout/fixed-layout + eeprom@0(0x4da8)
+old = re.compile(
+    r'compatible\s*=\s*"nvmem-cells";'
+    r'\s*#address-cells\s*=\s*<1>;'
+    r'\s*#size-cells\s*=\s*<1>;'
+    r'\s*macaddr_factory_4:\s*macaddr@4\s*\{'
+    r'\s*reg\s*=\s*<0x4 0x6>;'
+    r'\s*\};', re.S)
+new = (
+    'nvmem-layout {\n'
+    '\t\t\t\tcompatible = "fixed-layout";\n'
+    '\t\t\t\t#address-cells = <1>;\n'
+    '\t\t\t\t#size-cells = <1>;\n'
+    '\n'
+    '\t\t\t\teeprom_factory_0: eeprom@0 {\n'
+    '\t\t\t\t\treg = <0x0 0x4da8>;\n'
+    '\t\t\t\t};\n'
+    '\n'
+    '\t\t\t\tmacaddr_factory_4: macaddr@4 {\n'
+    '\t\t\t\t\treg = <0x4 0x6>;\n'
+    '\t\t\t\t};\n'
+    '\t\t\t}'
+)
+s, n = old.subn(new, s)
+print("factory nvmem-layout replaced:", n)
+
+# 2) pcie0 wifi 节点：移除旧 mediatek,mtd-eeprom，改用 nvmem eeprom 单元
+s = s.replace('\t\tmediatek,mtd-eeprom = <&factory 0x0>;\n', '')
+s = s.replace(
+    '\t\tnvmem-cells = <&macaddr_factory_4>;\n\t\tnvmem-cell-names = "mac-address";',
+    '\t\tnvmem-cells = <&eeprom_factory_0>, <&macaddr_factory_4>;\n\t\tnvmem-cell-names = "eeprom", "mac-address";')
+
+open(p, "w", encoding="utf-8").write(s)
+print("MSG1500 DTS patched for 5G eeprom")
+PYEOF
+elif [ -f "$MSG_DTS" ]; then
+  echo "==> MSG1500 DTS 已含 eeprom_factory_0，跳过 5G 修复"
+else
+  echo "==> 非 ramips/mt7621 或 DTS 不存在，跳过 MSG1500 5G 修复"
+fi
