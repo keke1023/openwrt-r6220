@@ -13,6 +13,10 @@
 #   无需依赖 feeds 覆盖逻辑，100% 确定收录 helloworld 版 luci-app-ssr-plus 及其底层依赖。
 
 SRC_BRANCH="${SOURCE_BRANCH:-openwrt-23.05}"
+# 当前编译机型（由 build.yml 经 env 传入，形如 dw33d.config）；用于按机型决定 helloworld 版本策略：
+#   大闪存机型(dw33d 128MB)用 master 最新；小闪存机型(k2p 等 16MB)保持旧 pin 把 xray 压在 v1.8.24。
+DEVICE_TARGET="${DEVICE_TARGET:-}"
+DEVICE="${DEVICE_TARGET%.config}"        # 去掉 .config 后缀，得纯设备名（dw33d / k2p）
 # 分支隔离：仅「真正的老 18.06（openwrt-18.06，4.x 内核）」跳过 helloworld master 源；
 # openwrt-18.06-k5.4 是「18.06 包基础 + 5.4 新内核」，兼容 helloworld / ngrokc / frpc，放行。
 case "$SRC_BRANCH" in
@@ -22,14 +26,17 @@ esac
 
 # ---------------------------------------------------------------------------
 # 分支策略（按 SOURCE_BRANCH 选 helloworld 版本）：
-#   - 18.06-k5.4：整体 checkout 到 coolsnowwolf 2024-09-13 的 commit
-#       24a191cedb8ce45dc07343544a78ef2369c68098（即 "xray-core: update to 1.8.24"），
-#       ssr-plus 停在 188、xray-core 停在 v1.8.24，适配老内核 + 小闪存。
+#   - 18.06-k5.4：按机型区分——
+#       · 小闪存机型(k2p 等 16MB)：checkout 到旧 commit 24a191c（ssr-plus 188 / xray v1.8.24，4MB 装得进 16MB）；
+#       · 大闪存机型(dw33d 128MB)：不 pin，用 master 最新（ssr-plus 190-3+ / xray v26.5.9，
+#         xray 源码编译需 Go 1.26，由 diy-golang.sh 对 dw33d 升 Go 1.26）。
 #   - 23.05 / master：用 helloworld 的 master 分支（非默认 dev 分支）。fw876/helloworld 的
 #       DEFAULT 分支是 dev（ssr-plus 196-7），但用户要的是 master 分支（ssr-plus 190-3）。
 #       clone 必须显式 -b master，否则会误拉 dev。xray-core 随 master 走（v25/v26，Go 1.26）。
 # 全量 clone（非浅克隆）：后续 18.06 需 git checkout 历史 commit，浅克隆不可靠。
 # ---------------------------------------------------------------------------
+# HELLOWORLD_PIN_COMMIT：仅「小闪存 18.06-k5.4 机型」(k2p 等 16MB) checkout 到该旧 commit，
+# 把 xray 压在 v1.8.24(4MB) 才塞得进 16MB；大闪存机型(dw33d 128MB)不 pin，直接用 master 最新。
 HELLOWORLD_PIN_COMMIT="24a191cedb8ce45dc07343544a78ef2369c68098"
 
 echo "==> 添加 luci-app-ssr-plus 源（fw876/helloworld，clone 到 package/helloworld）"
@@ -44,14 +51,23 @@ fi
 echo "==> helloworld 已就绪，luci-app-ssr-plus 来自：package/helloworld/luci-app-ssr-plus"
 
 cd package/helloworld
+# 18.06-k5.4 按机型区分 helloworld 版本：
+#   - dw33d(128MB NAND)：直接采用 clone 的 master 最新提交（ssr-plus 190-3+ / xray v26.5.9），
+#     用户要求追最新；xray v26.5.9 源码编译需 Go 1.26，diy-golang.sh 已对 dw33d 升到 1.26。
+#   - 其它 18.06-k5.4 小闪存机型(k2p 等)：checkout 旧 pin（ssr-plus 188 / xray v1.8.24），
+#     把 xray 压在 4MB 才塞得进 16MB，保持原行为不破坏。
+#   - 23.05 / master：本就用 master 最新。
 case "$SRC_BRANCH" in
   openwrt-18.06-k*)
-    echo "==> 18.06-k5.4：整库 checkout 到 $HELLOWORLD_PIN_COMMIT（ssr-plus 188 + xray v1.8.24，老内核/小闪存）"
-    git checkout "$HELLOWORLD_PIN_COMMIT"
+    if [ "$DEVICE" = "dw33d" ]; then
+      echo "==> 18.06-k5.4 (dw33d, 128MB NAND)：用 helloworld master 最新提交（xray v26.5.9 需 Go 1.26）"
+    else
+      echo "==> 18.06-k5.4 ($DEVICE 小闪存)：checkout 旧 pin $HELLOWORLD_PIN_COMMIT（ssr-plus 188 / xray v1.8.24）"
+      git checkout "$HELLOWORLD_PIN_COMMIT"
+    fi
     ;;
   *)
-    echo "==> 23.05/master：用 helloworld master 分支（ssr-plus 190-3；Rust 已在下方剥离）"
-    # clone 已显式 -b master 拉取 master 分支，无需再 checkout；整库采用 master 源码
+    echo "==> 23.05/master：用 helloworld master 分支最新提交（ssr-plus 190-3；Rust 已在下方剥离）"
     ;;
 esac
 cd ../..
