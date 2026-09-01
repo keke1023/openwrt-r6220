@@ -15,57 +15,6 @@ sed -i 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generat
 # 4) 可选：设置默认 root 密码（取消注释，把 YOUR_PASSWORD 换成你自己的）
 # sed -i 's/$1$V4UetPzk$CYXluq4wUazHjmCDBCqXF.//YOUR_PASSWORD_HASH/g' package/base-files/files/etc/shadow
 
-# 5) DW33D 纯 SPI NOR 启动支持
-#    immortalwrt 官方 dw33d 只生成 NAND ubi 固件（IMAGE_SIZE=96MB），无 SPI-only 镜像。
-#    注入 SPI NOR 镜像目标：写到 SPI 的 oem-firmware 分区（DTS 中 0x50000 起，15.625MB）。
-#    uboot 需配置为从 SPI 启动。生成的镜像在 bin/targets/ath79/nand/ 下：
-#      *-factory-nor.bin / *-sysupgrade-nor.bin
-NAND_MK="target/linux/ath79/image/nand.mk"
-if [ -f "$NAND_MK" ] && grep -q "define Device/domywifi_dw33d-nor" "$NAND_MK"; then
-  if ! grep -q "factory-nor.bin" "$NAND_MK"; then
-    echo "==> 注入 DW33D SPI NOR 镜像目标 (修正：针对 -nor 变体，避免 IMAGES:= 覆盖)"
-    python3 - "$NAND_MK" <<'PYEOF'
-import sys, re
-p = sys.argv[1]
-s = open(p, encoding="utf-8").read()
-# 只匹配 -nor 变体块；之前误匹配基础 domywifi_dw33d(NAND) 导致 -nor 的 IMAGES:= 把它覆盖掉
-m = re.search(r"(define Device/domywifi_dw33d-nor\n.*?)(\nendef)", s, re.S)
-if not m:
-    print("!! dw33d-nor block not found, skip")
-    sys.exit(0)
-pre, post = m.group(1), m.group(2)
-if "factory-nor.bin" in pre:
-    print("already patched, skip")
-    sys.exit(0)
-# 1) 在 -nor 变体内追加 NOR 友好镜像（带 check-size 14464k=15MiB，< 16MiB NOR）
-#    同时用 DEVICE_PACKAGES:= 覆盖继承来的 USB 包与 ath10k 5G（纯 SPI 精简版，砍掉 ath10k 5G 省空间，仅保留 2.4G ath9k）
-#    ⚠️ 真正让固件出得来的前提（已在 config-18.06/dw33d-spi.config 显式开启）：
-#       CONFIG_TARGET_ROOTFS_SQUASHFS=y —— 否则 $(KDIR)/root.squashfs 不生成，
-#       所有 append-rootfs 镜像（含源码自带的 sysupgrade.bin/breed-factory.bin）静默缺失，
-#       只剩 initramfs-kernel.bin。2026-08-27 的"无固件"正是此因，与 pad-to 写法无关。
-#    ⚠️ pad-to 写法：与源码 nand.mk 保持一致用 pad-to $$$$(BLOCKSIZE)（64k 对齐）。
-#       源码 immortalwrt 全仓库的 pad-to 都用 $$$$ 且工作正常；$$ 与 $$$$ 在此上下文等价（都解析成 64k），
-#       无需特别区分。父设备 domywifi_dw33d 的 KERNEL_SIZE=5120k（内核分区 5MB），本配置较肥，
-#       压缩内核易超 4MB，故不能用 pad-to 4096k（会触发 "file is bigger than pad size"）。
-add = ("\n"
-       "  DEVICE_PACKAGES := kmod-ath9k\n"
-       "  IMAGES += factory-nor.bin sysupgrade-nor.bin\n"
-       "  IMAGE/factory-nor.bin := append-kernel | pad-to $$$$(BLOCKSIZE) | append-rootfs | pad-rootfs | check-size 14464k\n"
-       "  IMAGE/sysupgrade-nor.bin := append-kernel | pad-to $$$$(BLOCKSIZE) | append-rootfs | pad-rootfs | check-size 14464k | append-metadata\n")
-new_block = pre + add + post
-# 2) 钉死 breed-factory.bin：pad-to 强制 14528k（防被放大成 28MB）+ check-size 14464k（禁止超 16MiB NOR）
-new_block = re.sub(
-    r"  IMAGE/breed-factory\.bin :=.*?append-okli-kernel \$\(1\)",
-    "  IMAGE/breed-factory.bin := append-kernel | pad-to 64k | append-rootfs | pad-rootfs | prepad-okli-kernel $(1) | pad-to 14464k | append-okli-kernel $(1) | check-size 14464k",
-    new_block, flags=re.S)
-# 3) -nor 的 IMAGE_SIZE 提到 14464k，使默认 sysupgrade.bin 的 check-size 也能放下 ~14.6MiB 内容
-new_block = re.sub(r"IMAGE_SIZE := 14464k", "IMAGE_SIZE := 14464k", new_block)
-open(p, "w", encoding="utf-8").write(s[:m.start()] + new_block + s[m.end():])
-print("patched nand.mk for DW33D SPI (-nor variant)")
-PYEOF
-  fi
-fi
-
 # 6/7/8) ramips/mt7621 设备 USB（及 A3004NS 无线）剔除
 #    这些设备的 USB/无线包写在 DEVICE_PACKAGES 里（.config 删不掉），必须改源码 mk。
 #    ⚠️ 旧实现用全局 sed/replace，会跨块误伤其他设备（尤其 tab 续行且 USB 包紧邻 endef 的设备，
