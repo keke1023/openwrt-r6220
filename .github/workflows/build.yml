@@ -23,7 +23,7 @@ env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt   # 主源码：immortalwrt（自带 luci-app-ngrokc / ngrokc / luci-app-frpc）
   REPO_BRANCH: openwrt-23.05
   DIY_P1_SH: scripts/diy-part1.sh     # 更新 feeds 之前执行：添加第三方源
-  DIY_GOLANG_SH: scripts/diy-golang.sh # feeds update 之后、install 之前：升级 Golang 工具链（dw33d/23.05/master→Go1.26, 18.06-k5.4 小闪存→Go1.22；按机型经 DEVICE_TARGET 区分）
+  DIY_GOLANG_SH: scripts/diy-golang.sh # feeds update 之后、install 之前：升级 Golang 工具链（18.06-k5.4/23.05/master 均 Go 1.26，编 helloworld 最新 xray）
   DIY_P2_SH: scripts/diy-part2.sh     # 编译之前执行：改默认管理 IP 等
   TZ: Asia/Shanghai
 
@@ -154,7 +154,6 @@ jobs:
       - name: 执行 DIY-P1（添加自定义源）
         env:
           SOURCE_BRANCH: ${{ inputs.source_branch || env.REPO_BRANCH }}
-          DEVICE_TARGET: ${{ matrix.config }}
         run: |
           cd openwrt
           chmod +x ../$DIY_P1_SH
@@ -163,13 +162,11 @@ jobs:
       - name: 更新并安装 feeds
         env:
           SOURCE_BRANCH: ${{ inputs.source_branch || env.REPO_BRANCH }}
-          DEVICE_TARGET: ${{ matrix.config }}
         run: |
           cd openwrt
           ./scripts/feeds update -a
-          # 升级 Golang 工具链（按机型 DEVICE_TARGET 区分，见 diy-golang.sh）：
-          #   dw33d / 23.05 / master → Go 1.26（最新 xray v26.5.9 的 go.mod 要求 go 1.26，自带 golang 编不过）；
-          #   18.06-k5.4 小闪存机型(k2p 等) → Go 1.22（pin 的 xray v1.8.24 老 sing 依赖避开 1.26 链接错误）。
+          # 升级 Golang 工具链（见 diy-golang.sh）：18.06-k5.4 / 23.05 / master 均升 Go 1.26
+          #   （helloworld master 最新 xray-core v26.5.9 的 go.mod 要求 go 1.26，自带 golang 编不过）。
           # 必须在 feeds update 之后（feeds/packages/ 此时才展开）、install 之前（确保装的是新版 golang）
           chmod +x ../$DIY_GOLANG_SH
           bash ../$DIY_GOLANG_SH
