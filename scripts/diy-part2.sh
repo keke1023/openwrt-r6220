@@ -490,3 +490,80 @@ else
   echo "==> mt7620.mk 不存在或已含 phicomm_k2-32m，跳过 K2 32M 设备注入"
 fi
 
+# ===========================================================================
+# 16) 18.06 系补 iptables-mod-socket 兼容元包（消除 luci-app-ssr-plus 的假警告）
+#     现象：18.06-k5.4 固件启动 ssr-plus 后日志报
+#           "警告：iptables 透明代理缺失基础依赖 iptables-mod-socket！"
+#     根因（已核实，非真缺功能，是**包名代差**）：
+#       helloworld master 的 luci-app-ssr-plus/root/etc/init.d/shadowsocksr 用
+#       dep_list="iptables-mod-tproxy iptables-mod-socket iptables-mod-iprange
+#                  iptables-mod-conntrack-extra kmod-ipt-nat"
+#       逐个检查 /usr/lib/opkg/info/<pkg>.control 是否存在，缺一即告警（纯静态检测）。
+#       而 18.06/18.06-k5.4 的 iptables 包**根本没有** iptables-mod-socket：
+#         · package/network/utils/iptables/Makefile 无 Package/iptables-mod-socket，
+#           socket match（libxt_socket.so）由 BuildPlugin(iptables-mod-tproxy,
+#           $(IPT_TPROXY-m)) 一并拷进 iptables-mod-tproxy；
+#         · include/netfilter.mk 的 IPT_TPROXY 组里就是 nf_add(...XT_MATCH_SOCKET,
+#           $(P_XT)xt_socket)，即 xt_socket.ko / nf_socket_ipv4/ipv6 都在 kmod-ipt-tproxy；
+#         · 23.05 起才拆成独立的 iptables-mod-socket + kmod-ipt-socket。
+#       → 功能无恙，只是 18.06 把 socket match 合并进了 tproxy 包。
+#     做法：补一个**空元包** iptables-mod-socket，DEPENDS:=+iptables-mod-tproxy，
+#       安装后仅生成 /usr/lib/opkg/info/iptables-mod-socket.control，检测即通过；
+#       刻意**不复制任何文件**，避免与 iptables-mod-tproxy 争抢 libxt_socket.so
+#       触发 opkg 的 check_data_file_clashes。
+#     判据：仅当主源 iptables Makefile 里没有 Package/iptables-mod-socket（=18.06 系）
+#           时注入；23.05/master 自带真包，自动跳过，不产生重名冲突。
+# ===========================================================================
+IPT_MK="package/network/utils/iptables/Makefile"
+if [ -f "$IPT_MK" ] && ! grep -q "Package/iptables-mod-socket" "$IPT_MK"; then
+  COMPAT_DIR="package/network/utils/iptables-mod-socket-compat"
+  if [ ! -f "$COMPAT_DIR/Makefile" ]; then
+    echo "==> 注入 iptables-mod-socket 兼容元包（18.06 系：socket match 实际在 iptables-mod-tproxy 内）"
+    mkdir -p "$COMPAT_DIR"
+    cat > "$COMPAT_DIR/Makefile" <<'MKEOF'
+# 兼容元包：18.06 系源码没有独立的 iptables-mod-socket 包。
+# 真正的 socket match（libxt_socket.so）与内核 xt_socket.ko / nf_socket_ipv4/ipv6
+# 都在 iptables-mod-tproxy / kmod-ipt-tproxy 里，本包只提供包名，不安装任何文件。
+include $(TOPDIR)/rules.mk
+
+PKG_NAME:=iptables-mod-socket
+PKG_RELEASE:=1
+
+include $(INCLUDE_DIR)/package.mk
+
+define Package/iptables-mod-socket
+  SECTION:=net
+  CATEGORY:=Network
+  SUBMENU:=Firewall
+  TITLE:=Socket match iptables extensions (compat meta package)
+  DEPENDS:=+iptables-mod-tproxy
+  PKGARCH:=all
+endef
+
+define Package/iptables-mod-socket/description
+Compatibility meta package for 18.06 based sources. The iptables socket
+match (libxt_socket.so) and the xt_socket kernel modules are shipped
+inside iptables-mod-tproxy / kmod-ipt-tproxy on this branch.
+endef
+
+define Build/Prepare
+endef
+
+define Build/Configure
+endef
+
+define Build/Compile
+endef
+
+define Package/iptables-mod-socket/install
+endef
+
+$(eval $(call BuildPackage,iptables-mod-socket))
+MKEOF
+  else
+    echo "==> iptables-mod-socket 兼容元包已存在，跳过"
+  fi
+else
+  echo "==> 主源自带 iptables-mod-socket（23.05 系）或 iptables 目录缺失，跳过兼容元包注入"
+fi
+
