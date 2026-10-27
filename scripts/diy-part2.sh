@@ -357,3 +357,47 @@ if [ -d "$MSG_PATCH_DIR" ]; then
 else
   echo "==> 未找到 $MSG_PATCH_DIR，跳过 MT7615 补丁"
 fi
+
+# ===========================================================================
+# 14) Phicomm K2P 32M (ramips/mt7621, 32MB SPI-NOR) 设备移植注入
+#     上游只内置标准 16MB 版 phicomm_k2p（IMAGE_SIZE 15744k），没有 32MB 变体。
+#     本段注入：DTS(mt7621_phicomm_k2p_32m.dts) + mt7621.mk 设备定义。
+#     分区：u-boot/u-boot-env/factory/permanent_config 保持不变，
+#           firmware 扩为 0xa0000+0x1f60000（正好到 32MB 末尾）→ IMAGE_SIZE := 32128k。
+#     网络：compatible "phicomm,k2p-32m" 无需单列 02_network 分支，
+#           原生兜底 *) = ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "wan"，
+#           与 K2P 的 4×LAN + 1×WAN 完全一致（已核实 23.05 的 02_network）。
+#     仅在 immortalwrt（mt7621.mk 存在）时生效；18.06 等无此文件则整段跳过。
+# ===========================================================================
+if [ -f "$RAMIPS_MK" ] && ! grep -q "define Device/phicomm_k2p-32m" "$RAMIPS_MK"; then
+  echo "==> 注入 Phicomm K2P 32M 设备定义到 $RAMIPS_MK"
+
+  # --- 14.1 mt7621.mk 设备定义（SPI-NOR + dsa-migration；无线仅 MT7615）---
+  cat >> "$RAMIPS_MK" <<'MKEOF'
+
+define Device/phicomm_k2p-32m
+  $(Device/dsa-migration)
+  IMAGE_SIZE := 32128k
+  DEVICE_VENDOR := Phicomm
+  DEVICE_MODEL := K2P 32M
+  DEVICE_ALT0_VENDOR := Phicomm
+  DEVICE_ALT0_MODEL := KE 2P
+  DEVICE_DTS := mt7621_phicomm_k2p_32m
+  DEVICE_DTS_DIR := ../dts
+  SUPPORTED_DEVICES += k2p-32m
+  DEVICE_PACKAGES := kmod-mt7615-firmware -uboot-envtools
+endef
+TARGET_DEVICES += phicomm_k2p-32m
+MKEOF
+
+  # --- 14.2 拷贝 DTS 到源码 dts 目录 ---
+  K2P_DTS_SRC="../scripts/mt7621_phicomm_k2p_32m.dts"
+  if [ -f "$K2P_DTS_SRC" ]; then
+    echo "==> 拷贝 DTS: $K2P_DTS_SRC -> target/linux/ramips/dts/mt7621_phicomm_k2p_32m.dts"
+    cp "$K2P_DTS_SRC" "target/linux/ramips/dts/mt7621_phicomm_k2p_32m.dts"
+  else
+    echo "!! 警告: 未找到 $K2P_DTS_SRC，K2P 32M 将无法编译（DTS 缺失）"
+  fi
+else
+  echo "==> mt7621.mk 不存在或已含 phicomm_k2p-32m，跳过 K2P 32M 设备注入"
+fi
