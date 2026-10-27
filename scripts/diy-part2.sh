@@ -362,8 +362,10 @@ fi
 # 14) Phicomm K2P 32M (ramips/mt7621, 32MB SPI-NOR) 设备移植注入
 #     上游只内置标准 16MB 版 phicomm_k2p（IMAGE_SIZE 15744k），没有 32MB 变体。
 #     本段注入：DTS(mt7621_phicomm_k2p_32m.dts) + mt7621.mk 设备定义。
-#     分区：u-boot/u-boot-env/factory/permanent_config 保持不变，
-#           firmware 扩为 0xa0000+0x1f60000（正好到 32MB 末尾）→ IMAGE_SIZE := 32128k。
+#     分区：u-boot/u-boot-env/factory 保持不变，删掉原厂 permanent_config，
+#           firmware 前移到 0x50000 并扩为 0x50000+0x1fb0000（正好到 32MB 末尾）
+#           → IMAGE_SIZE := 32448k（= 0x1fb0000 / 1024）。
+#           即固件从 factory 之后紧接开始，与 Breed/常见 MT7621 布局一致。
 #     网络：compatible "phicomm,k2p-32m" 无需单列 02_network 分支，
 #           原生兜底 *) = ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "wan"，
 #           与 K2P 的 4×LAN + 1×WAN 完全一致（已核实 23.05 的 02_network）。
@@ -377,7 +379,7 @@ if [ -f "$RAMIPS_MK" ] && ! grep -q "define Device/phicomm_k2p-32m" "$RAMIPS_MK"
 
 define Device/phicomm_k2p-32m
   $(Device/dsa-migration)
-  IMAGE_SIZE := 32128k
+  IMAGE_SIZE := 32448k
   DEVICE_VENDOR := Phicomm
   DEVICE_MODEL := K2P 32M
   DEVICE_ALT0_VENDOR := Phicomm
