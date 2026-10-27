@@ -1,0 +1,44 @@
+#include "mt7620a_phicomm_k2x.dtsi"
+
+/*
+ * Phicomm K2 (PSG1218, MT7620A) — 32MB SPI-NOR variant
+ *   —— 适用于 immortalwrt openwrt-18.06-k5.4 分支 ——
+ *
+ * 与 23.05 版（mt7620a_phicomm_k2_32m.dts）的唯一差异：
+ *   18.06-k5.4 的 target/linux/ramips/dts/mt7620a.dtsi 只定义了 pa_pins，
+ *   **没有 pa_gpio_pins**（23.05 才有）。若照搬 23.05 版的
+ *   `pinctrl-1 = <&pa_gpio_pins>`，dtc 会报 label 找不到、整台设备编不出固件。
+ *   故此处按 18.06 自带的 mt7620a_phicomm_k2-v22.4.dts 写法，只保留 default/pa_pins。
+ *
+ * 硬件定义全部沿用共享的 mt7620a_phicomm_k2x.dtsi（LED、reset 键、spi0 分区底板、
+ * pcie 上的 MT7612E、内置 2.4G wmac 校准数据、factory 里的 MAC），仅改动固件分区：
+ *   - firmware 起始保持 0x50000（紧接 factory 之后，与原厂 v22.4 / psg1218b 布局一致，
+ *     也与 Breed 常见布局一致；这里不保留 permanent_config）；
+ *   - firmware 大小扩展到整片 32MB 的剩余空间。
+ *
+ *   0x000000 - 0x030000  u-boot      (read-only)
+ *   0x030000 - 0x040000  u-boot-env  (read-only)
+ *   0x040000 - 0x050000  factory     (read-only)
+ *   0x050000 - 0x2000000 firmware    (0x1fb0000 = 32448 KiB)
+ */
+/ {
+	compatible = "phicomm,k2-32m", "ralink,mt7620a-soc";
+	model = "Phicomm K2 32M";
+};
+
+&partitions {
+	partition@50000 {
+		compatible = "denx,uimage";
+		label = "firmware";
+		reg = <0x50000 0x1fb0000>;
+	};
+};
+
+&ethernet {
+	mediatek,portmap = "llllw";
+};
+
+&wmac {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pa_pins>;
+};
