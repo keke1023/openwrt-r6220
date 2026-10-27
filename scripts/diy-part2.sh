@@ -507,17 +507,22 @@ fi
 #           $(P_XT)xt_socket)，即 xt_socket.ko / nf_socket_ipv4/ipv6 都在 kmod-ipt-tproxy；
 #         · 23.05 起才拆成独立的 iptables-mod-socket + kmod-ipt-socket。
 #       → 功能无恙，只是 18.06 把 socket match 合并进了 tproxy 包。
-#     做法：补一个**空元包** iptables-mod-socket，DEPENDS:=+iptables-mod-tproxy，
-#       安装后仅生成 /usr/lib/opkg/info/iptables-mod-socket.control，检测即通过；
-#       刻意**不复制任何文件**，避免与 iptables-mod-tproxy 争抢 libxt_socket.so
+#     做法：补一个元包 iptables-mod-socket，DEPENDS:=+iptables-mod-tproxy，
+#       安装后生成 /usr/lib/opkg/info/iptables-mod-socket.control，检测即通过；
+#       **不复制 libxt_socket.so**，避免与 iptables-mod-tproxy 争抢同一文件
 #       触发 opkg 的 check_data_file_clashes。
+#       ⚠ install 段**不能留空**：include/package-ipkg.mk 用
+#         `ifdef Package/<name>/install` 判定，空定义等价于未定义 →
+#         打印 "WARNING: skipping <pkg> -- package has no install section"
+#         且该包不会进镜像（ipk 照样编得出来，表现为「编译成功但固件里没这个包」）。
+#       故 install 段必须真装至少一个文件（这里放一个无害的说明文件）。
 #     判据：仅当主源 iptables Makefile 里没有 Package/iptables-mod-socket（=18.06 系）
 #           时注入；23.05/master 自带真包，自动跳过，不产生重名冲突。
 # ===========================================================================
 IPT_MK="package/network/utils/iptables/Makefile"
 if [ -f "$IPT_MK" ] && ! grep -q "Package/iptables-mod-socket" "$IPT_MK"; then
   COMPAT_DIR="package/network/utils/iptables-mod-socket-compat"
-  if [ ! -f "$COMPAT_DIR/Makefile" ]; then
+  if [ ! -f "$COMPAT_DIR/Makefile" ] || ! grep -q 'INSTALL_DIR' "$COMPAT_DIR/Makefile"; then
     echo "==> 注入 iptables-mod-socket 兼容元包（18.06 系：socket match 实际在 iptables-mod-tproxy 内）"
     mkdir -p "$COMPAT_DIR"
     cat > "$COMPAT_DIR/Makefile" <<'MKEOF'
@@ -556,6 +561,11 @@ define Build/Compile
 endef
 
 define Package/iptables-mod-socket/install
+	$(INSTALL_DIR) $(1)/usr/share/iptables-mod-socket
+	echo "compat meta package: on 18.06 the socket match (libxt_socket.so) and" \
+		"xt_socket/nf_socket_* kernel modules are shipped by iptables-mod-tproxy" \
+		"and kmod-ipt-tproxy." \
+		> $(1)/usr/share/iptables-mod-socket/README
 endef
 
 $(eval $(call BuildPackage,iptables-mod-socket))
