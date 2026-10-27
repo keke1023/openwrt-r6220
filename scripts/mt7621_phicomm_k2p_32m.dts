@@ -7,12 +7,15 @@
  * Phicomm K2P — 32MB SPI-NOR variant
  *
  * 派生自 immortalwrt openwrt-23.05 的 target/linux/ramips/dts/mt7621_phicomm_k2p.dts，
- * 仅把固件分区扩大到整片 32MB 的剩余空间（其余硬件定义完全一致）：
- *   0x000000 - 0x030000  u-boot            (read-only)
- *   0x030000 - 0x040000  u-boot-env        (read-only)
- *   0x040000 - 0x050000  factory           (read-only)
- *   0x050000 - 0x0a0000  permanent_config  (read-only)
- *   0x0a0000 - 0x2000000 firmware  (0x1f60000 = 32128 KiB)
+ * 仅调整固件分区（其余硬件定义完全一致）：
+ *   - 删掉原厂的 permanent_config（0x50000-0xa0000），固件分区前移到 0x50000，
+ *     与 Breed / 常见 MT7621 布局一致（firmware 紧跟 factory 之后）；
+ *   - 固件分区扩展到整片 32MB 的剩余空间。
+ *
+ *   0x000000 - 0x030000  u-boot      (read-only)
+ *   0x030000 - 0x040000  u-boot-env  (read-only)
+ *   0x040000 - 0x050000  factory     (read-only)
+ *   0x050000 - 0x2000000 firmware    (0x1fb0000 = 32448 KiB)
  */
 / {
 	compatible = "phicomm,k2p-32m", "mediatek,mt7621-soc";
@@ -87,15 +90,9 @@
 			};
 
 			partition@50000 {
-				label = "permanent_config";
-				reg = <0x50000 0x50000>;
-				read-only;
-			};
-
-			partition@a0000 {
 				compatible = "denx,uimage";
 				label = "firmware";
-				reg = <0xa0000 0x1f60000>;
+				reg = <0x50000 0x1fb0000>;
 			};
 		};
 	};
