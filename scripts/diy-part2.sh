@@ -403,3 +403,77 @@ MKEOF
 else
   echo "==> mt7621.mk 不存在或已含 phicomm_k2p-32m，跳过 K2P 32M 设备注入"
 fi
+
+# ===========================================================================
+# 15) Phicomm K2 32M (ramips/mt7620, MT7620A, 32MB SPI-NOR) 设备移植注入
+#     上游只内置 8MB 版 phicomm_k2-v22.4（IMAGE_SIZE 7872k）/ phicomm_k2-v22.5（7552k）
+#     与 phicomm_psg1218b，没有 32MB 变体。
+#     本段注入三件套：
+#       ① DTS  mt7620a_phicomm_k2_32m.dts（由 k2x.dtsi 派生，仅改 firmware 分区）
+#       ② mt7620.mk 设备定义（SOC=mt7620a，显式 DEVICE_DTS 避免默认名带连字符）
+#       ③ board.d/02_network 的 interfaces + macs 分支
+#     分区：u-boot/u-boot-env/factory 不变，firmware 起始保持 0x50000
+#           （与原厂 v22.4 一致，不设 permanent_config），
+#           大小 0x50000+0x1fb0000（正好到 32MB 末尾）→ IMAGE_SIZE := 32448k。
+#     重要：MT7620 是 swconfig 平台，不像 mt7621(DSA) 有 *) 兜底分支，
+#           若不加 02_network 分支，开机后 LAN/WAN 全空、只能靠串口救。
+#     仅在 immortalwrt（mt7620.mk 存在）时生效；18.06 等无此文件则整段跳过。
+# ===========================================================================
+MT7620_MK="target/linux/ramips/image/mt7620.mk"
+if [ -f "$MT7620_MK" ] && ! grep -q "define Device/phicomm_k2-32m" "$MT7620_MK"; then
+  echo "==> 注入 Phicomm K2 32M 设备定义到 $MT7620_MK"
+
+  # --- 15.1 mt7620.mk 设备定义（SPI-NOR；无线 MT7612E 由 kmod-mt76x2 带）---
+  cat >> "$MT7620_MK" <<'MKEOF'
+
+define Device/phicomm_k2-32m
+  SOC := mt7620a
+  IMAGE_SIZE := 32448k
+  DEVICE_VENDOR := Phicomm
+  DEVICE_MODEL := K2
+  DEVICE_VARIANT := 32M
+  DEVICE_DTS := mt7620a_phicomm_k2_32m
+  DEVICE_DTS_DIR := ../dts
+  DEVICE_PACKAGES := kmod-mt76x2
+  SUPPORTED_DEVICES += k2-32m
+endef
+TARGET_DEVICES += phicomm_k2-32m
+MKEOF
+
+  # --- 15.2 拷贝 DTS 到源码 dts 目录 ---
+  K2_DTS_SRC="../scripts/mt7620a_phicomm_k2_32m.dts"
+  if [ -f "$K2_DTS_SRC" ]; then
+    echo "==> 拷贝 DTS: $K2_DTS_SRC -> target/linux/ramips/dts/mt7620a_phicomm_k2_32m.dts"
+    cp "$K2_DTS_SRC" "target/linux/ramips/dts/mt7620a_phicomm_k2_32m.dts"
+  else
+    echo "!! 警告: 未找到 $K2_DTS_SRC，K2 32M 将无法编译（DTS 缺失）"
+  fi
+
+  # --- 15.3 注入 board.d/02_network：interfaces + macs 分支 ---
+  #     锚点：phicomm,k2-v22.4|\ 在 interfaces 与 macs 两个 case 分组里各出现一次，
+  #     在它前面插入 phicomm,k2-32m|\ 即可复用 v22.4 的网口(0:lan:4..3:lan:1,4:wan,6@eth0)
+  #     与 MAC 取址(factory 0x2e) 规则。
+  K2_N2="target/linux/ramips/mt7620/base-files/etc/board.d/02_network"
+  if [ -f "$K2_N2" ] && ! grep -q "phicomm,k2-32m" "$K2_N2"; then
+    echo "==> 注入 02_network 分支到 $K2_N2"
+    python3 - "$K2_N2" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+needle = "\tphicomm,k2-v22.4|\\\n"
+ins = "\tphicomm,k2-32m|\\\n"
+n = s.count(needle)
+if n == 0:
+    print("!! WARNING: 未找到 phicomm,k2-v22.4 锚点，02_network 未修改（网口/MAC 会缺分支）")
+else:
+    s = s.replace(needle, ins + needle)
+    open(p, "w", encoding="utf-8").write(s)
+    print("patched 02_network: phicomm,k2-32m inserted into %d case group(s)" % n)
+PYEOF
+  else
+    echo "==> 02_network 未找到或已含 phicomm,k2-32m，跳过网络分支注入"
+  fi
+else
+  echo "==> mt7620.mk 不存在或已含 phicomm_k2-32m，跳过 K2 32M 设备注入"
+fi
+
