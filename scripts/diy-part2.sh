@@ -410,6 +410,9 @@ fi
 #     与 phicomm_psg1218b，没有 32MB 变体。
 #     本段注入三件套：
 #       ① DTS  mt7620a_phicomm_k2_32m.dts（由 k2x.dtsi 派生，仅改 firmware 分区）
+#          注意：23.05 与 18.06-k5.4 的 mt7620a.dtsi 不同 —— 18.06 只有 pa_pins、
+#          没有 pa_gpio_pins，故准备了两个版本，脚本按 dtsi 里是否存在
+#          pa_gpio_pins 自动挑选（见 15.2），两分支共用同一目标 DTS 名。
 #       ② mt7620.mk 设备定义（SOC=mt7620a，显式 DEVICE_DTS 避免默认名带连字符）
 #       ③ board.d/02_network 的 interfaces + macs 分支
 #     分区：u-boot/u-boot-env/factory 不变，firmware 起始保持 0x50000
@@ -417,7 +420,8 @@ fi
 #           大小 0x50000+0x1fb0000（正好到 32MB 末尾）→ IMAGE_SIZE := 32448k。
 #     重要：MT7620 是 swconfig 平台，不像 mt7621(DSA) 有 *) 兜底分支，
 #           若不加 02_network 分支，开机后 LAN/WAN 全空、只能靠串口救。
-#     仅在 immortalwrt（mt7620.mk 存在）时生效；18.06 等无此文件则整段跳过。
+#     仅在 immortalwrt（mt7620.mk 存在）时生效；openwrt-23.05 与 openwrt-18.06-k5.4
+#     两者均内置该文件，故两个分支都会执行本站注入。
 # ===========================================================================
 MT7620_MK="target/linux/ramips/image/mt7620.mk"
 if [ -f "$MT7620_MK" ] && ! grep -q "define Device/phicomm_k2-32m" "$MT7620_MK"; then
@@ -440,8 +444,17 @@ endef
 TARGET_DEVICES += phicomm_k2-32m
 MKEOF
 
-  # --- 15.2 拷贝 DTS 到源码 dts 目录 ---
-  K2_DTS_SRC="../scripts/mt7620a_phicomm_k2_32m.dts"
+  # --- 15.2 拷贝 DTS 到源码 dts 目录（按分支 dtsi 自动选版本）---
+  #     23.05 的 mt7620a.dtsi 同时定义 pa_pins 与 pa_gpio_pins，DTS 可写双 pinctrl 状态；
+  #     18.06-k5.4 只有 pa_pins，引用 pa_gpio_pins 会 dtc 报 label 找不到 → 整机编不出。
+  #     故以目标 dtsi 是否含 pa_gpio_pins 为判据选择 DTS 源文件，目标文件名保持一致。
+  if grep -q 'pa_gpio_pins' target/linux/ramips/dts/mt7620a.dtsi 2>/dev/null; then
+    K2_DTS_SRC="../scripts/mt7620a_phicomm_k2_32m.dts"
+    echo "==> 检测到 pa_gpio_pins（23.05 系），使用标准版 DTS"
+  else
+    K2_DTS_SRC="../scripts/mt7620a_phicomm_k2_32m_1806.dts"
+    echo "==> 未检测到 pa_gpio_pins（18.06 系），使用仅 pa_pins 版 DTS"
+  fi
   if [ -f "$K2_DTS_SRC" ]; then
     echo "==> 拷贝 DTS: $K2_DTS_SRC -> target/linux/ramips/dts/mt7620a_phicomm_k2_32m.dts"
     cp "$K2_DTS_SRC" "target/linux/ramips/dts/mt7620a_phicomm_k2_32m.dts"
