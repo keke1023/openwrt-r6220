@@ -1,0 +1,38 @@
+#include "mt7620a_phicomm_k2x.dtsi"
+
+/*
+ * Phicomm K2 (PSG1218, MT7620A) — 32MB SPI-NOR variant
+ *
+ * 派生自 immortalwrt openwrt-23.05 的 target/linux/ramips/dts/mt7620a_phicomm_k2-v22.4.dts，
+ * 硬件定义全部沿用共享的 mt7620a_phicomm_k2x.dtsi，仅改动固件分区：
+ *   - firmware 起始保持 0x50000（紧接 factory 之后，与原厂 v22.4 / psg1218b 布局一致，
+ *     也与 Breed 常见 MT7621/MT7620 布局一致；这里不再保留 permanent_config）；
+ *   - firmware 大小扩展到整片 32MB 的剩余空间。
+ *
+ *   0x000000 - 0x030000  u-boot      (read-only)
+ *   0x030000 - 0x040000  u-boot-env  (read-only)
+ *   0x040000 - 0x050000  factory     (read-only)
+ *   0x050000 - 0x2000000 firmware    (0x1fb0000 = 32448 KiB)
+ */
+/ {
+	compatible = "phicomm,k2-32m", "ralink,mt7620a-soc";
+	model = "Phicomm K2 32M";
+};
+
+&partitions {
+	partition@50000 {
+		compatible = "denx,uimage";
+		label = "firmware";
+		reg = <0x50000 0x1fb0000>;
+	};
+};
+
+&ethernet {
+	mediatek,portmap = "llllw";
+};
+
+&wmac {
+	pinctrl-names = "default", "pa_gpio";
+	pinctrl-0 = <&pa_pins>;
+	pinctrl-1 = <&pa_gpio_pins>;
+};
