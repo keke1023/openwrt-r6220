@@ -169,6 +169,17 @@ if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns'; then
   usb_sweep
 fi
 
+# 硬件 offload 反向强制 =y：本机自用明确启用（config 里已 =y，这里兜底防被压回 =n）
+#   kmod-ipt-offload → xt_FLOWOFFLOAD（含 --hw）
+#   kmod-nf-flow     → 置位 CONFIG_NF_FLOW_TABLE + CONFIG_NF_FLOW_TABLE_HW，
+#                      硬件卸载路径缺此符号会退化，故两者必须同时为 y
+if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns'; then
+  for p in kmod-ipt-offload kmod-nf-flow; do
+    sed -i "s/^CONFIG_PACKAGE_${p}=.*/CONFIG_PACKAGE_${p}=y/" .config
+    grep -q "^CONFIG_PACKAGE_${p}=" .config || echo "CONFIG_PACKAGE_${p}=y" >> .config
+  done
+fi
+
 echo "==> [阶段4] 不重跑 defconfig，直接复核关键包状态："
 echo "--- 期望全为 =n（全家桶/turboacc 已剔除）---"
 grep -E 'luci-app-diskman|luci-app-passwall|luci-app-rclone|luci-app-turboacc|TURBOACC_INCLUDE_' .config
@@ -200,6 +211,8 @@ if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns'; then
   fi
   echo "--- [16MB 机型] Luci 冗余应用复核（应均为 =n）---"
   grep -E '^CONFIG_PACKAGE_(luci-app-filetransfer|luci-lib-fs|luci-app-cpufreq)=' .config || echo "（未出现在 .config，等效于未选中）"
+  echo "--- [16MB 机型] 硬件 offload 复核（应均为 =y，缺一即不会真正走 PPE）---"
+  grep -E '^CONFIG_PACKAGE_(kmod-ipt-offload|kmod-nf-flow)=' .config
   echo "--- [16MB 机型] 内核 USB 开关确认 ---"
   if [ -e build_dir/target-*/linux-*/linux-*/.config ]; then
     grep -E '^CONFIG_USB=|^CONFIG_USB_SUPPORT=|^CONFIG_USB_XHCI' build_dir/target-*/linux-*/linux-*/.config || true

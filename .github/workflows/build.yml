@@ -178,6 +178,9 @@ jobs:
           ./scripts/feeds install -a
 
       - name: 执行 DIY-P2（修改默认设置）
+        env:
+          # 机型名：diy-part2 据此决定是否注入硬件 offload 的 uci-defaults / 防火墙默认项
+          TARGET_CONFIG: ${{ matrix.config }}
         run: |
           cd openwrt
           chmod +x ../$DIY_P2_SH
@@ -249,6 +252,29 @@ jobs:
       - name: 体积预算检查（16MB 小闪存机型）
         if: steps.compile.outputs.status == 'success'
         run: |
+          # ── 硬件 offload 落地校验（本机型强制启用，缺一项就直接失败）──
+          if echo "${{ matrix.config }}" | grep -qiE 'a3004ns'; then
+            KC=$(ls -1 openwrt/build_dir/target-*/linux-*/linux-*/.config 2>/dev/null | head -1)
+            if [ -n "$KC" ]; then
+              echo "==> 内核 flowtable 符号（$KC）"
+              grep -E '^CONFIG_NF_FLOW_TABLE(_HW)?=' "$KC" || echo "!! 未找到 NF_FLOW_TABLE 符号"
+              if ! grep -qE '^CONFIG_NF_FLOW_TABLE_HW=[ym]' "$KC"; then
+                echo "!! 失败：CONFIG_NF_FLOW_TABLE_HW 未置位 —— fw3 的 FLOWOFFLOAD --hw 不会生效"
+                echo "   排查：确认 .config 里 CONFIG_PACKAGE_kmod-nf-flow=y（其 KCONFIG 带 NF_FLOW_TABLE_HW）"
+                exit 1
+              fi
+              echo "OK：NF_FLOW_TABLE_HW 已编入，PPE 硬件卸载路径成立"
+            else
+              echo "!! 未找到内核 .config，跳过硬件 offload 符号校验"
+            fi
+            echo "==> 下发侧：image 默认 firewall 配置"
+            grep -E 'flow_offloading' openwrt/package/network/config/firewall/files/firewall.config \
+              || { echo "!! 失败：firewall.config 未带 flow_offloading 选项"; exit 1; }
+            echo "==> 下发侧：首次启动补齐脚本"
+            ls -l openwrt/files/etc/uci-defaults/99-a3004ns-hw-offload \
+              || { echo "!! 失败：uci-defaults 未注入（diy-part2 第17段未执行？）"; exit 1; }
+          fi
+
           cd openwrt/bin/targets/*/*
           # 仅对 16MB SPI NOR 机型做硬校验：镜像必须小于 firmware 分区 16128k，
           # 且至少留 1MiB 给 overlay（配置/日志/opkg 都写在 overlay 上）。

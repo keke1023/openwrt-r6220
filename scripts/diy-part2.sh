@@ -729,3 +729,83 @@ UCIEOF
 else
   echo "==> [16] 未找到 ipq40xx 的 ezviz DTS 或 generic.mk，跳过 W3 32MB 注入"
 fi
+
+# ---------------------------------------------------------------------------
+# [17] A3004NS-dual：启用 MT7621 PPE 硬件 offload（nf_flow_table 硬件卸载路径）
+#   只对本机型生效：TARGET_CONFIG 由 workflow 的 DIY-P2 步骤注入矩阵机型名，
+#   为空或不含 a3004ns 时整段跳过，绝不污染其它机型（其它机型可能没有
+#   xt_FLOWOFFLOAD，硬写 flow_offloading 会让 fw3 启动时报 target 不存在）。
+#
+#   内核侧前提（config 已保证）：
+#     kmod-ipt-offload=y → 提供 xt_FLOWOFFLOAD（含 --hw 参数）
+#     kmod-nf-flow=y    → KCONFIG 同时置位 CONFIG_NF_FLOW_TABLE 与
+#                         CONFIG_NF_FLOW_TABLE_HW，缺 NF_FLOW_TABLE_HW 时
+#                         fw3 的 --hw 会退化/报错，硬件卸载不成立
+#   驱动侧前提（本分支默认即有）：
+#     CONFIG_NET_RALINK_OFFLOAD=y（Kconfig 里 def_bool NET_RALINK_SOC +
+#     depends on NET_RALINK_MT7621），实现见 ralink/mtk_offload.c
+#
+#   下发侧落两处，互为备份：
+#     a) files/etc/uci-defaults/99-a3004ns-hw-offload —— 首次启动写 uci，
+#        sysupgrade 保留旧 /etc/config 时也能补齐（脚本执行后自动删除）
+#     b) 直接补丁 firewall 包的默认 firewall.config —— 首次刷入即带好选项，
+#        不依赖 uci-defaults 的执行时机
+# ---------------------------------------------------------------------------
+if echo "${TARGET_CONFIG:-}" | grep -qiE 'a3004ns'; then
+  echo "==> [17] 注入硬件 offload（$TARGET_CONFIG）：fw3 flow_offloading_hw=1"
+
+  FW_CONF="package/network/config/firewall/files/firewall.config"
+  if [ -f "$FW_CONF" ]; then
+    python3 - "$FW_CONF" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+if "flow_offloading" in s:
+    print("  firewall.config 已含 flow_offloading，跳过补丁")
+else:
+    lines = s.split("\n")
+    out, done = [], False
+    for ln in lines:
+        out.append(ln)
+        if not done and ln.strip() == "config defaults":
+            out.append("\toption flow_offloading\t\t1")
+            out.append("\toption flow_offloading_hw\t1")
+            done = True
+    if not done:
+        print("  !! 未找到 'config defaults' 段，firewall.config 未修改")
+        sys.exit(0)
+    open(p, "w", encoding="utf-8").write("\n".join(out))
+    print("  patched %s: defaults 段加入 flow_offloading / flow_offloading_hw" % p)
+PYEOF
+  else
+    echo "  (skip firewall.config 补丁：未找到 $FW_CONF，可能不是 firewall3 分支)"
+  fi
+
+  mkdir -p files/etc/uci-defaults
+  cat > files/etc/uci-defaults/99-a3004ns-hw-offload <<'UCIEOF'
+#!/bin/sh
+# A3004NS-dual 首次启动：启用 MT7621 PPE 硬件 offload
+# 由 r6220 云编译 diy-part2.sh 第 17 段注入，执行一次后自动删除。
+# 说明：flow_offloading 是 flow_offloading_hw 的前置开关，两个都必须写。
+# 校验：只有内核真的带 nf_flow_table_hw（内建或 .ko）才启用，
+#       否则 fw3 下发 `-j FLOWOFFLOAD --hw` 会失败并让防火墙启动报错。
+#       判据用 modules.builtin / modules.dep —— 比 /sys/module 可靠
+#       （内建模块不一定有 /sys/module 项，误判会导致功能静默不生效）。
+_KV=$(uname -r)
+if ! grep -q "nf_flow_table_hw" "/lib/modules/$_KV/modules.builtin" 2>/dev/null && \
+   ! grep -q "nf_flow_table_hw" "/lib/modules/$_KV/modules.dep" 2>/dev/null; then
+	logger -t hw-offload "内核未带 nf_flow_table_hw，跳过硬件 offload（不影响正常上网）"
+	exit 0
+fi
+uci -q get firewall.@defaults[0] >/dev/null 2>&1 || exit 0
+uci -q set firewall.@defaults[0].flow_offloading='1'
+uci -q set firewall.@defaults[0].flow_offloading_hw='1'
+uci -q commit firewall
+logger -t hw-offload "已启用 flow_offloading + flow_offloading_hw"
+exit 0
+UCIEOF
+  chmod +x files/etc/uci-defaults/99-a3004ns-hw-offload
+  echo "  已注入 /etc/uci-defaults/99-a3004ns-hw-offload（首次启动写入 uci 并 commit）"
+else
+  echo "==> [17] 非 a3004ns 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过硬件 offload 注入"
+fi
