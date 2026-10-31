@@ -49,6 +49,39 @@ TURBOACC_INCLUDE_SHORTCUT_FE \
 TURBOACC_INCLUDE_SHORTCUT_FE_DRV \
 "
 
+# ---------------------------------------------------------------------------
+# 按机型追加剔除项：16MB 纯有线机型（a3004ns-dual）关掉整个无线子系统
+# ---------------------------------------------------------------------------
+# 为什么必须在 defconfig 之后强制 =n：
+#   ramips/mt7621 的 target.mk DEFAULT_PACKAGES 里带 kmod-mt76x2 + wpad-basic，
+#   而 kmod-mt76x2 会经 DEPENDS/select 把 kmod-mt76-core → kmod-mac80211 → kmod-cfg80211
+#   整条链拽进来（合计约 1.2MiB）。在 config-*.config 里写 =n 常被 select 覆盖，
+#   只有 defconfig 后逐个 sed 才压得住。
+#   ⚠️ 仅对 a3004ns 生效：dw33d(ath79) 等机型要 wifi，不能全局关 wpad/iwinfo/wireless-regdb。
+TARGET_CONFIG="${TARGET_CONFIG:-}"
+if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns'; then
+  echo "==> 检测到 16MB 纯有线机型（$TARGET_CONFIG），追加剔除整个无线子系统"
+  FORCE_OFF="$FORCE_OFF \
+kmod-mt76x2 \
+kmod-mt76-core \
+kmod-mt76 \
+kmod-mac80211 \
+kmod-cfg80211 \
+kmod-mt7602e \
+kmod-mt7612e \
+wpad-basic \
+wpad-basic-mbedtls \
+wpad-basic-wolfssl \
+wpad-openssl \
+wpad-wolfssl \
+wpad \
+iwinfo \
+wireless-regdb \
+libiwinfo \
+libiwinfo-lua \
+"
+fi
+
 for p in $FORCE_OFF; do
   sed -i "s/^CONFIG_PACKAGE_${p}=[ym]/CONFIG_PACKAGE_${p}=n/" .config
   grep -q "^CONFIG_PACKAGE_${p}=" .config || echo "CONFIG_PACKAGE_${p}=n" >> .config
@@ -68,3 +101,19 @@ echo "--- 期望全为 =n（全家桶/turboacc 已剔除）---"
 grep -E 'luci-app-diskman|luci-app-passwall|luci-app-rclone|luci-app-turboacc|TURBOACC_INCLUDE_' .config
 echo "--- 确认 openssl 仍在（ngrokc/default-settings/libcurl/ssr-plus 硬依赖，必须保留）---"
 grep -E '^CONFIG_PACKAGE_libopenssl=|^CONFIG_PACKAGE_libustream-openssl=|^CONFIG_PACKAGE_wpad-basic' .config
+
+# ---------------------------------------------------------------------------
+# 16MB 机型专项复核：无线必须全灭，xray/ssr-plus 必须在
+# ---------------------------------------------------------------------------
+if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns'; then
+  echo "--- [16MB 机型] 无线子系统复核（出现 =y/=m 即会超预算）---"
+  BAD=$(grep -E '^CONFIG_PACKAGE_(kmod-mt76|kmod-mac80211|kmod-cfg80211|kmod-mt7602e|kmod-mt7612e|wpad|iwinfo|libiwinfo|wireless-regdb)[^=]*=[ym]' .config || true)
+  if [ -n "$BAD" ]; then
+    echo "$BAD"
+    echo "!! 警告：仍有无线包被选中，实际体积会超 16MB 预算"
+  else
+    echo "OK：无线相关包全部未选中"
+  fi
+  echo "--- [16MB 机型] 代理链复核（应均为 =y）---"
+  grep -E '^CONFIG_PACKAGE_(xray-core|luci-app-ssr-plus|chinadns-ng|iptables-mod-socket|dnsmasq-full)=' .config
+fi

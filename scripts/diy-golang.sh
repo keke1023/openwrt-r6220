@@ -20,6 +20,8 @@
 #   若提前替换会被 feeds update 的 git 操作覆盖/冲突，故必须在 update 之后、install 之前。
 
 SRC_BRANCH="${SOURCE_BRANCH:-openwrt-23.05}"
+# 当前编译的机型 config 基名（build.yml 以 TARGET_CONFIG 注入），用于按机型选 Go 大版本
+TARGET_CONFIG="${TARGET_CONFIG:-}"
 
 # 仅「真正的老 18.06（openwrt-18.06，4.x 内核）」不编 xray-core，跳过升级。
 case "$SRC_BRANCH" in
@@ -31,11 +33,20 @@ if [ ! -d "feeds/packages/lang" ]; then
   exit 1
 fi
 
-# 按分支选 Go 大版本：18.06-k5.4 与 23.05/master 均升到 Go 1.26
-# （helloworld master 最新 xray-core v25/v26 的 go.mod 要求 go 1.25+/1.26，自带 golang 编不过）。
-# 注：此前为兼容 k2p 等 16MB 小闪存机型的旧 pin xray v1.8.24 才保留 Go 1.22；那些机型已删除，
-#     18.06-k5.4 下仅剩 dw33d（128MB），统一升 Go 1.26 编最新 xray。
+# 按机型选 Go 大版本：
+#   - 默认（23.05/master/大闪存）：Go 1.26 —— helloworld master 最新 xray v25/v26 的 go.mod 要求 1.25+/1.26
+#   - 16MB 小闪存（a3004ns 等，pin 到 xray v1.8.4）：Go 1.22 —— v1.8.4 的 go.mod 只要求 go 1.20，
+#     用 1.22 足够；新版 Go 编出的二进制更大，且宿主 bootstrap 更慢，没必要。
 GOLANG_BRANCH="26.x"
+case "$TARGET_CONFIG" in
+  *a3004ns*) GOLANG_BRANCH="22.x" ;;
+esac
+
+# 分支存在性兜底：sbwml 仓库若已删旧分支，退回 26.x 并在日志里显式告警，避免构建直接失败
+if ! git ls-remote --heads https://github.com/sbwml/packages_lang_golang.git "$GOLANG_BRANCH" 2>/dev/null | grep -q .; then
+  echo "!! 警告：sbwml/packages_lang_golang 的 $GOLANG_BRANCH 分支不可用，回退 26.x"
+  GOLANG_BRANCH="26.x"
+fi
 
 echo "==> 升级 Golang 工具链为 Go ${GOLANG_BRANCH%%.x} (sbwml/packages_lang_golang ${GOLANG_BRANCH})"
 echo "==> 当前自带 golang 版本："

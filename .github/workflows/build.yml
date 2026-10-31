@@ -154,6 +154,9 @@ jobs:
       - name: 执行 DIY-P1（添加自定义源）
         env:
           SOURCE_BRANCH: ${{ inputs.source_branch || env.REPO_BRANCH }}
+          # 机型名（如 a3004ns-dual.config）：diy-part1 据此对 16MB 小闪存机型
+          # pin helloworld 到 a201839（xray v1.8.4），大闪存机型仍走 master 最新
+          TARGET_CONFIG: ${{ matrix.config }}
         run: |
           cd openwrt
           chmod +x ../$DIY_P1_SH
@@ -162,6 +165,8 @@ jobs:
       - name: 更新并安装 feeds
         env:
           SOURCE_BRANCH: ${{ inputs.source_branch || env.REPO_BRANCH }}
+          # 机型名：diy-golang 据此选 Go 大版本（16MB 机型用 22.x 编 xray v1.8.4，其余 26.x）
+          TARGET_CONFIG: ${{ matrix.config }}
         run: |
           cd openwrt
           ./scripts/feeds update -a
@@ -196,6 +201,9 @@ jobs:
           make defconfig
 
       - name: 强制剔除默认全家桶与 openssl 链（defconfig 之后固化）
+        env:
+          # 机型名：diy-strip 据此对 16MB 机型追加剔除整个无线子系统
+          TARGET_CONFIG: ${{ matrix.config }}
         run: |
           cd openwrt
           chmod +x ../scripts/diy-strip.sh
@@ -236,6 +244,33 @@ jobs:
             echo "status=failed" >> "$GITHUB_OUTPUT"
             echo "!! 未生成任何固件镜像（bin/targets 下无 .bin/.img），编译实际失败"
             exit 1
+          fi
+
+      - name: 体积预算检查（16MB 小闪存机型）
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          cd openwrt/bin/targets/*/*
+          # 仅对 16MB SPI NOR 机型做硬校验：镜像必须小于 firmware 分区 16128k，
+          # 且至少留 1MiB 给 overlay（配置/日志/opkg 都写在 overlay 上）。
+          if echo "${{ matrix.config }}" | grep -qiE 'a3004ns'; then
+            SYS=$(ls -1 *squashfs-sysupgrade.bin 2>/dev/null | head -1)
+            [ -z "$SYS" ] && { echo "!! 未找到 squashfs-sysupgrade 镜像"; exit 1; }
+            SZ=$(stat -c%s "$SYS")
+            LIMIT=$((16128*1024))
+            LEFT=$(( (LIMIT-SZ)/1024 ))
+            echo "镜像      : $SYS"
+            echo "镜像大小  : $((SZ/1024)) KiB"
+            echo "分区上限  : 16128 KiB"
+            echo "剩余给overlay: ${LEFT} KiB"
+            if [ "$SZ" -gt "$LIMIT" ]; then
+              echo "!! 失败：镜像超过 firmware 分区，无法刷入。请回退 xray 版本或继续裁剪。"
+              exit 1
+            fi
+            if [ "$LEFT" -lt 1024 ]; then
+              echo "!! 警告：overlay 余量不足 1MiB，运行期大概率写满（建议改 extroot 或再裁剪）"
+            else
+              echo "OK：体积在预算内"
+            fi
           fi
 
       - name: 整理固件文件
