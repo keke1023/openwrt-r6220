@@ -577,3 +577,155 @@ else
   echo "==> 主源自带 iptables-mod-socket（23.05 系）或 iptables 目录缺失，跳过兼容元包注入"
 fi
 
+# 16) EZVIZ CS-W3-WD1200G (W3) —— ipq40xx / IPQ4018 + 128MB DDR3，32MB SPI-NOR 改造
+#
+#     背景：这台机器原厂只有 16MB SPI-NOR（Macronix MX25L12805D），
+#           装不下 ssr-plus 依赖的 xray-core（精简版 UPX 后仍需 5.8MB，
+#           而 16MB 布局下 overlay 只剩约 3MB），故硬件换 32MB 芯片。
+#           换片后必须让 Linux 侧分区表同步扩容，否则多出来的 16MB 用不上。
+#
+#     本段做三件事（全部幂等，可重复执行）：
+#       ① 改 DTS：firmware 分区从 0x180000+0xE80000(14.5MiB) 扩到 0x180000+0x1E80000(30.5MiB)
+#          0x180000 + 0x1E80000 = 0x2000000 = 32MiB，正好吃掉芯片末尾
+#       ② 改 generic.mk：IMAGE_SIZE 14848k -> 31232k
+#          （0x1E80000 = 31981568 B = 31232 KiB，与 firmware 分区严格对齐；
+#            不放开这个限制，即使 DTS 扩容了，编译期 check-size 仍会卡在 14.5MB）
+#       ③ 注入 32MB zram swap（不用 zram-swap 包，因为它按 RAM/2=64MB 建盘，
+#          对 128MB 机器反而挤占物理内存）
+#
+#     ⚠️ 分区前段（SBL1/MIBIB/QSEE/CDT/DDRPARAMS/APPSBLENV/APPSBL/ART）一律不动：
+#        0x00000000 ~ 0x00180000 共 1.5MB，含 U-Boot、DDR 参数、MAC 地址和 Wi-Fi 校准
+#        （ART 分区里的 precal_art_1000 / precal_art_5000 是 ath10k 的预校准数据）。
+#        换芯片时必须把原片这 1.5MB 原样烧到新片同位置，否则砖且 Wi-Fi 无校准。
+#
+#     ⚠️ 设备名不能改：BOARD_NAME 决定 ipq-wifi BDF 包名，DTS 里
+#        qcom,ath10k-calibration-variant = "ezviz-cs-w3-wd1200g-eup" 决定驱动找哪个
+#        board-*-ezviz_cs-w3-wd1200g-eup 校准文件。一旦改设备名，BDF 找不到，Wi-Fi 退化。
+#
+#     ⚠️ Wi-Fi 驱动：上游 generic.mk 的 DEVICE_PACKAGES 已写死
+#        `-kmod-ath10k-ct kmod-ath10k-ct-smallbuffers`，即 smallbuffers 变体是默认行为，
+#        本段无需再改（config 里显式固化一次，防 defconfig 翻回 regular buffer）。
+IPQ40XX_DTS=$(ls target/linux/ipq40xx/files*/arch/arm/boot/dts/qcom-ipq4018-cs-w3-wd1200g-eup.dts 2>/dev/null | head -1)
+IPQ40XX_GMK="target/linux/ipq40xx/image/generic.mk"
+if [ -n "$IPQ40XX_DTS" ] && [ -f "$IPQ40XX_GMK" ]; then
+  echo "==> [16] EZVIZ W3 32MB 闪存布局注入（DTS: $IPQ40XX_DTS）"
+  python3 - "$IPQ40XX_DTS" "$IPQ40XX_GMK" <<'PYEOF'
+import re, sys
+
+dts_path, gmk_path = sys.argv[1], sys.argv[2]
+FLASH_BYTES = 0x02000000          # 32MB
+
+# ---- (1) DTS: firmware 分区扩容 ----
+s = open(dts_path, encoding="utf-8").read()
+pat = re.compile(
+    r'(label\s*=\s*"firmware";\s*\n\s*reg\s*=\s*<)(0x[0-9a-fA-F]+)(\s+)(0x[0-9a-fA-F]+)(>;)'
+)
+m = pat.search(s)
+if not m:
+    print("  !! DTS: 未找到 firmware 分区的 label+reg 组合，放弃（请人工检查）")
+    sys.exit(1)
+
+start = int(m.group(2), 16)
+size_old = int(m.group(4), 16)
+size_new = FLASH_BYTES - start
+
+if size_old == size_new:
+    print("  DTS: firmware 已是目标布局（%.1fMiB），跳过" % (size_new / 1048576.0))
+else:
+    new_reg = "%s0x%08x%s0x%08x%s" % (
+        m.group(1), start, m.group(3), size_new, m.group(5)
+    )
+    s = s[:m.start()] + new_reg + s[m.end():]
+    # 节点名 partitionN@xxx 只是标签、不参与解析，顺手按真实起始地址修正，便于阅读
+    s = re.sub(
+        r'partition(\d+)@[0-9a-fA-F]+(\s*\{\s*\n\s*compatible\s*=\s*"denx,fit";)',
+        lambda mm: "partition%s@%x%s" % (mm.group(1), start, mm.group(2)),
+        s)
+    open(dts_path, "w", encoding="utf-8").write(s)
+    print("  DTS: firmware 0x%08x+0x%08x (%.1fMB) -> +0x%08x (%.1fMB)，止于 0x%08x"
+          % (start, size_old, size_old / 1048576.0, size_new, size_new / 1048576.0,
+             start + size_new))
+
+# ---- (2) generic.mk: IMAGE_SIZE ----
+DEV = "ezviz_cs-w3-wd1200g-eup"
+OLD_ISZ, NEW_ISZ = "IMAGE_SIZE := 14848k", "IMAGE_SIZE := 31232k"
+lines = open(gmk_path, encoding="utf-8").read().split("\n")
+b_start = None
+for i, ln in enumerate(lines):
+    if ln.startswith("define Device/" + DEV):
+        b_start = i
+        break
+if b_start is None:
+    print("  !! generic.mk: 未找到 define Device/%s 块" % DEV)
+else:
+    b_end = None
+    for j in range(b_start, len(lines)):
+        if lines[j].rstrip() == "endef":
+            b_end = j
+            break
+    if b_end is None:
+        print("  !! generic.mk: %s 块缺少 endef" % DEV)
+    else:
+        seg = "\n".join(lines[b_start:b_end])
+        if NEW_ISZ in seg:
+            print("  generic.mk: IMAGE_SIZE 已是 31232k，跳过")
+        elif OLD_ISZ in seg:
+            lines[b_start:b_end] = seg.replace(OLD_ISZ, NEW_ISZ).split("\n")
+            open(gmk_path, "w", encoding="utf-8").write("\n".join(lines))
+            print("  generic.mk: %s  IMAGE_SIZE 14848k -> 31232k（14.5MiB -> 30.5MiB）" % DEV)
+        else:
+            print("  !! generic.mk: %s 块内未找到 IMAGE_SIZE := 14848k（上游可能已变更）" % DEV)
+
+# ---- 自检：分区总长必须正好等于芯片容量 ----
+end_max = 0
+for ln in open(dts_path, encoding="utf-8").read().split("\n"):
+    mm = re.search(r'reg\s*=\s*<\s*(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s*>;', ln)
+    if mm:
+        end_max = max(end_max, int(mm.group(1), 16) + int(mm.group(2), 16))
+print("  自检: 全部分区末端 = 0x%08x (%dMB)，芯片容量 = 0x%08x (%dMB)  %s"
+      % (end_max, end_max // 0x100000, FLASH_BYTES, FLASH_BYTES // 0x100000,
+         "OK" if end_max == FLASH_BYTES else "!! 不匹配，请检查分区表"))
+PYEOF
+
+  # ---- (3) 32MB zram swap（自定义 init，绕开 zram-swap 包的 RAM/2 逻辑）----
+  # 注意：diy-part2.sh 在 workflow 里于 `cp .config` 之前执行，此时拿不到矩阵中的
+  # 机型名，因此本脚本会随 files/ 打包进【所有机型】的固件。没有 kmod-zram 的机型
+  # modprobe 失败即 return 0，不建盘、不占内存，实测无副作用；
+  # 只有本 config 选了 CONFIG_PACKAGE_kmod-zram=y 的机型（即本机型）才真正生效。
+  mkdir -p files/etc/init.d files/etc/uci-defaults
+  cat > files/etc/init.d/zramswap <<'ZRAMEOF'
+#!/bin/sh /etc/rc.common
+# 32MB zram swap —— 128MB 内存机型的应急缓冲
+# 由 r6220 云编译 diy-part2.sh 第 16 段注入。
+# 若系统中已有 zram 在用（例如同时装了 zram-swap 包），本脚本检测后直接退出。
+START=11
+
+start() {
+	[ -e /sys/block/zram0/disksize ] || modprobe zram 2>/dev/null || return 0
+	# disksize 非 0 说明已有盘在用，不重复建
+	[ "$(cat /sys/block/zram0/disksize 2>/dev/null)" = "0" ] || return 0
+	echo 33554432 > /sys/block/zram0/disksize 2>/dev/null || return 0
+	mkswap /dev/zram0 >/dev/null 2>&1
+	swapon -p 10 /dev/zram0 2>/dev/null
+}
+
+stop() {
+	swapoff /dev/zram0 2>/dev/null
+	echo 1 > /sys/block/zram0/reset 2>/dev/null
+}
+ZRAMEOF
+  chmod +x files/etc/init.d/zramswap
+  # rc.d 的启动链接交给 OpenWrt 自己的 `enable` 生成：
+  # 直接在构建机上 ln -s 会因宿主平台不同而失败（Windows/无符号链接权限报
+  # "Operation not permitted"，且会留下 0 字节垃圾文件）。
+  # uci-defaults 脚本在固件首次启动时执行一次后自动删除，跨平台且符合 OpenWrt 规范。
+  cat > files/etc/uci-defaults/99-enable-zramswap <<'UCIEOF'
+#!/bin/sh
+/etc/init.d/zramswap enable
+exit 0
+UCIEOF
+  chmod +x files/etc/uci-defaults/99-enable-zramswap
+  echo "  已注入 /etc/init.d/zramswap（32MB，swap 优先级 10）+ uci-defaults 自动 enable"
+else
+  echo "==> [16] 未找到 ipq40xx 的 ezviz DTS 或 generic.mk，跳过 W3 32MB 注入"
+fi
