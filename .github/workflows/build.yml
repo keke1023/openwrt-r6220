@@ -212,6 +212,40 @@ jobs:
           chmod +x ../scripts/diy-strip.sh
           bash ../scripts/diy-strip.sh
 
+      - name: 配置一致性校验（kconfig 解析，防剔除项被依赖/select 拉回）
+        env:
+          TARGET_CONFIG: ${{ matrix.config }}
+        run: |
+          cd openwrt
+          # 背景：2026-10-31 的构建里，diy-strip 跑完复核显示「USB 链全部未选中」，
+          # 但 52 分钟后 package/kernel/linux 打包时却报
+          #   Package kmod-usb-net is missing dependencies ... mii.ko
+          # 说明 make 阶段读到的 .config 与裁剪后的 .config 不一致（配置被重新解析/拉回）。
+          # 这里用 kconfig 自己解析一遍（与 make 的 out-of-sync 检查同一手法），
+          # 把偏差直接打出来；有偏差就立刻失败，避免再白烧一小时。
+          echo "==> 先让 tmp 索引与 scripts/config/conf 就绪（此前 conf 是 make 时才编出来的）"
+          make prepare-tmpinfo >/dev/null 2>&1 || true
+
+          echo "==> 索引就绪后再跑一次裁剪（幂等，且此时才能稳定压住 default y）"
+          bash ../scripts/diy-strip.sh || exit 1
+
+          echo "==> 用 kconfig 解析 .config，检查剔除项是否被拉回"
+          cp .config /tmp/resolved.config
+          ./scripts/config/conf --defconfig=/tmp/resolved.config -w /tmp/resolved.config Config.in >/dev/null 2>&1 || true
+
+          echo "--- make 会看到的偏差（左侧 .config，右侧 kconfig 解析结果）---"
+          ./scripts/kconfig.pl '>' .config /tmp/resolved.config | head -80 || true
+
+          # 注意：kmod-mii 是刻意置 y 的依赖自洽补丁，不在检查范围内
+          BAD=$(grep -E '^CONFIG_PACKAGE_(kmod-usb[^=]*|kmod-mt76[a-z0-9]*|kmod-mac80211|kmod-cfg80211|wpad[a-z0-9_.-]*)=(y|m)$' /tmp/resolved.config || true)
+          if [ -n "$BAD" ]; then
+            echo "!! 失败：以下被剔除的包在 kconfig 解析后又出现了（说明有包 select / DEVICE_PACKAGES 拉回）："
+            echo "$BAD"
+            echo "!! 请据此定位拉回源头（多为 mt7621.mk 的 DEVICE_PACKAGES 或某个包的 select）"
+            exit 1
+          fi
+          echo "OK：剔除项在 kconfig 解析后仍未选中，.config 与 make 的视图一致"
+
       - name: 诊断：dump 实际生效配置与已选大包
         run: |
           cd openwrt

@@ -153,7 +153,9 @@ fi
 
 for p in $FORCE_OFF; do
   sed -i "s/^CONFIG_PACKAGE_${p}=[ym]/CONFIG_PACKAGE_${p}=n/" .config
-  grep -q "^CONFIG_PACKAGE_${p}=" .config || echo "CONFIG_PACKAGE_${p}=n" >> .config
+  if ! grep -qE "^CONFIG_PACKAGE_${p}=" .config && ! grep -q "^# CONFIG_PACKAGE_${p} is not set" .config; then
+    echo "CONFIG_PACKAGE_${p}=n" >> .config
+  fi
 done
 
 echo "==> [阶段2] make defconfig（补全新符号，会翻回部分 default y）"
@@ -162,7 +164,9 @@ make defconfig
 echo "==> [阶段3] defconfig 后再次强制 =n（此时 default y 可被覆盖）"
 for p in $FORCE_OFF; do
   sed -i "s/^CONFIG_PACKAGE_${p}=[ym]/CONFIG_PACKAGE_${p}=n/" .config
-  grep -q "^CONFIG_PACKAGE_${p}=" .config || echo "CONFIG_PACKAGE_${p}=n" >> .config
+  if ! grep -qE "^CONFIG_PACKAGE_${p}=" .config && ! grep -q "^# CONFIG_PACKAGE_${p} is not set" .config; then
+    echo "CONFIG_PACKAGE_${p}=n" >> .config
+  fi
 done
 # USB 通配再扫一次：defconfig 会把 default y 的 block-mount 以及被 select 的 kmod-usb-* 翻回来
 if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns'; then
