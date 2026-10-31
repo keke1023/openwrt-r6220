@@ -127,6 +127,19 @@ fdisk \
 lsblk \
 luci-app-hd-idle \
 "
+  # -------------------------------------------------------------------------
+  # Luci 冗余应用（都来自 include/target.mk 的 DEFAULT_PACKAGES.tweak，默认 y）
+  # -------------------------------------------------------------------------
+  #   luci-app-filetransfer + luci-lib-fs：文件传输页面，filetransfer 的
+  #     LUCI_DEPENDS 就是 +luci-lib-fs，两者是唯一依赖关系，可一起关。
+  #   luci-app-cpufreq：LUCI_DEPENDS:=@(arm||aarch64)，MIPS 上本就选不中，
+  #     这里压一遍只是防上游把依赖放宽。
+  echo "==> 检测到 16MB 纯有线机型（$TARGET_CONFIG），追加剔除 Luci 冗余应用"
+  FORCE_OFF="$FORCE_OFF \
+luci-app-filetransfer \
+luci-lib-fs \
+luci-app-cpufreq \
+"
   # 通配兜底：静态清单总会漏（kmod-usb-net-* / kmod-usb-serial-* 有几十个变体，
   # 且随内核版本增删），只有正则才能保证「一条 usb 都不剩」。
   usb_sweep() {
@@ -185,6 +198,8 @@ if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns'; then
   else
     echo "OK：USB 及存储相关包全部未选中（内核 CONFIG_USB 不会置位）"
   fi
+  echo "--- [16MB 机型] Luci 冗余应用复核（应均为 =n）---"
+  grep -E '^CONFIG_PACKAGE_(luci-app-filetransfer|luci-lib-fs|luci-app-cpufreq)=' .config || echo "（未出现在 .config，等效于未选中）"
   echo "--- [16MB 机型] 内核 USB 开关确认 ---"
   if [ -e build_dir/target-*/linux-*/linux-*/.config ]; then
     grep -E '^CONFIG_USB=|^CONFIG_USB_SUPPORT=|^CONFIG_USB_XHCI' build_dir/target-*/linux-*/linux-*/.config || true
