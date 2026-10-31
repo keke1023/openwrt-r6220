@@ -69,7 +69,9 @@ echo "==> helloworld 已就绪，luci-app-ssr-plus 来自：package/helloworld/l
 #      比 master 线要求的 Go 1.26 更省宿主编译时间（且 1.22 编出的二进制更小）。
 #
 # ⚠️ 若你的服务端用到 XHTTP/splithttp 等新传输，或 reality 连接异常，
-#    把下面 PIN_COMMIT 改成空串（走 master 最新）并把该机型换到 extroot 方案。
+#    把下面 PIN_COMMIT 改成空串（走 master 最新）；但注意本机型已在 config 里
+#    关闭整条 USB 链（无 extroot 退路），走 master 最新 xray 会撑爆 16MB 分区，
+#    届时必须同时把 USB 那几个包回开才有可行解。
 SMALL_FLASH_PATTERNS="*a3004ns*"
 PIN_COMMIT="a201839"
 

@@ -23,7 +23,7 @@ env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt   # 主源码：immortalwrt（自带 luci-app-ngrokc / ngrokc / luci-app-frpc）
   REPO_BRANCH: openwrt-23.05
   DIY_P1_SH: scripts/diy-part1.sh     # 更新 feeds 之前执行：添加第三方源
-  DIY_GOLANG_SH: scripts/diy-golang.sh # feeds update 之后、install 之前：升级 Golang 工具链（18.06-k5.4/23.05/master 均 Go 1.26，编 helloworld 最新 xray）
+  DIY_GOLANG_SH: scripts/diy-golang.sh # feeds update 之后、install 之前：升级 Golang 工具链（16MB 机型 Go 1.22 编 xray v1.8.4；23.05/master Go 1.26 编最新 xray）
   DIY_P2_SH: scripts/diy-part2.sh     # 编译之前执行：改默认管理 IP 等
   TZ: Asia/Shanghai
 
@@ -200,9 +200,9 @@ jobs:
           echo 'CONFIG_CCACHE=y' >> .config   # 启用 ccache，配合上面的 ccache 缓存
           make defconfig
 
-      - name: 强制剔除默认全家桶与 openssl 链（defconfig 之后固化）
+      - name: 强制剔除默认全家桶/无无线/USB 链（defconfig 之后固化）
         env:
-          # 机型名：diy-strip 据此对 16MB 机型追加剔除整个无线子系统
+          # 机型名：diy-strip 据此对 16MB 机型追加剔除整个无线子系统 + 整条 USB 链
           TARGET_CONFIG: ${{ matrix.config }}
         run: |
           cd openwrt
@@ -267,7 +267,8 @@ jobs:
               exit 1
             fi
             if [ "$LEFT" -lt 1024 ]; then
-              echo "!! 警告：overlay 余量不足 1MiB，运行期大概率写满（建议改 extroot 或再裁剪）"
+              echo "!! 警告：overlay 余量不足 1MiB，运行期大概率写满"
+              echo "   注意：本机型已关闭整条 USB 链，extroot 不可用 —— 唯一出路是重编固件再裁剪。"
             else
               echo "OK：体积在预算内"
             fi
