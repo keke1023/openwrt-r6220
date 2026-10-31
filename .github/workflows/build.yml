@@ -234,8 +234,68 @@ jobs:
           ./scripts/config/conf --defconfig=/tmp/resolved.config -w /tmp/resolved.config Config.in >/dev/null 2>&1 || true
 
           echo "--- make 会看到的偏差（左侧 .config，右侧 kconfig 解析结果）---"
-          ./scripts/kconfig.pl '>' .config /tmp/resolved.config | head -80 || true
+          ./scripts/kconfig.pl '>' .config /tmp/resolved.config > /tmp/kdiff.txt 2>/dev/null || true
+          head -80 /tmp/kdiff.txt
 
+          # ---- 校验 0：任何被 kconfig 拉回 =y 的包，都是潜在 Error 255 ----
+          # 这是最通用的判据：只要解析结果里出现 .config 明写 =n、却被求解成 y/m 的包，
+          # 说明该包被上层硬依赖（DEPENDS/select），而打包阶段却按 .config 不产出它的 ipk，
+          # 最终必然在 package/install 阶段以 "cannot find dependency ..." 收场。
+          # run 111661978562 就是这样：libiwinfo-lua 被 luci 硬依赖，我们却强制 =n。
+          # 只认「.config 明写 =n 且解析为 y/m」这一种组合，避免误伤 select 产生的良性偏差。
+          PULLED=""
+          while read -r line; do
+            case "$line" in
+              CONFIG_PACKAGE_*=y|CONFIG_PACKAGE_*=m) ;;
+              *) continue ;;
+            esac
+            p=${line#CONFIG_PACKAGE_}
+            p=${p%=*}
+            if grep -qE "^CONFIG_PACKAGE_${p}=n$|^# CONFIG_PACKAGE_${p} is not set$" .config; then
+              PULLED="$PULLED $line"
+            fi
+          done < /tmp/kdiff.txt
+          if [ -n "$PULLED" ]; then
+            echo "!! 失败：下列包在 .config 里是 =n，却被依赖求解强制拉成 y/m（打包阶段会缺 ipk）："
+            for l in $PULLED; do echo "   $l"; done
+            echo "!! 处理：把这些符号从 config-*.config 的 =n 列表与 diy-strip 的 FORCE_OFF 中移除。"
+            echo "!!       （若确实要剔除，需先去掉硬依赖它的上层包。）"
+            exit 1
+          fi
+          echo "OK：解析结果没有把任何包翻回 =y/m"
+
+          # ---- 校验 A：diy-strip 导出的剔除清单，逐项确认没被 kconfig 翻回 =y ----
+          # 背景：run 111661978562 的失败正是这一类。我们把 libiwinfo / libiwinfo-lua
+          # 强制 =n（它们看着像"无线包"），但 luci 元包 LUCI_DEPENDS 里写死了
+          # +libiwinfo-lua → kconfig 求解把它翻回 =y → 打包阶段按 .config 的 =n 不产出
+          # 该 ipk → package/install 阶段 opkg 报
+          #   "cannot find dependency libiwinfo-lua for luci" → Error 255。
+          # 当时的旧检查只覆盖 kmod-usb*/mt76*/wpad，所以直接放行了。
+          # 现在改为：以 diy-strip 实际导出的清单为唯一真相，一个都不漏。
+          LIST=/tmp/force-off.list
+          if [ -s "$LIST" ]; then
+            BAD_OFF=""
+            while read -r p; do
+              [ -n "$p" ] || continue
+              if grep -qE "^CONFIG_PACKAGE_${p}=(y|m)$" /tmp/resolved.config; then
+                BAD_OFF="$BAD_OFF $p"
+              fi
+            done < "$LIST"
+            if [ -n "$BAD_OFF" ]; then
+              echo "!! 失败：以下被强制 =n 的包，被 kconfig 依赖求解翻回 y/m："
+              for p in $BAD_OFF; do
+                echo "   CONFIG_PACKAGE_${p}=y   ← 有包硬依赖它（DEPENDS/select），无法剔除"
+              done
+              echo "!! 处理：从 scripts/diy-strip.sh 的 FORCE_OFF 里移除上述符号；"
+              echo "!!       若确需剔除，得先去掉依赖它的上层包（如 luci 元包→libiwinfo-lua）。"
+              exit 1
+            fi
+            echo "OK：剔除清单 $(grep -c . "$LIST") 项在 kconfig 解析后均未被翻回"
+          else
+            echo "!! 警告：未找到 $LIST，跳过清单校验（diy-strip 可能未走到导出步骤）"
+          fi
+
+          # ---- 校验 B：已知高危符号的兜底（防清单本身漏项）----
           # 注意：kmod-mii 是刻意置 y 的依赖自洽补丁，不在检查范围内
           BAD=$(grep -E '^CONFIG_PACKAGE_(kmod-usb[^=]*|kmod-mt76[a-z0-9]*|kmod-mac80211|kmod-cfg80211|wpad[a-z0-9_.-]*)=(y|m)$' /tmp/resolved.config || true)
           if [ -n "$BAD" ]; then
@@ -244,6 +304,16 @@ jobs:
             echo "!! 请据此定位拉回源头（多为 mt7621.mk 的 DEVICE_PACKAGES 或某个包的 select）"
             exit 1
           fi
+
+          # ---- 校验 C：luci 硬依赖必须齐备（上次 Error 255 的直接原因）----
+          for p in libiwinfo libiwinfo-lua libiwinfo-data; do
+            if ! grep -qE "^CONFIG_PACKAGE_${p}=y$" .config; then
+              echo "!! 失败：CONFIG_PACKAGE_${p} 不是 y —— luci 元包会因此装不上（opkg Error 255）"
+              exit 1
+            fi
+          done
+          echo "OK：libiwinfo 三件套齐备（luci 硬依赖已满足）"
+
           echo "OK：剔除项在 kconfig 解析后仍未选中，.config 与 make 的视图一致"
 
       - name: 诊断：dump 实际生效配置与已选大包

@@ -57,7 +57,16 @@ TURBOACC_INCLUDE_SHORTCUT_FE_DRV \
 #   而 kmod-mt76x2 会经 DEPENDS/select 把 kmod-mt76-core → kmod-mac80211 → kmod-cfg80211
 #   整条链拽进来（合计约 1.2MiB）。在 config-*.config 里写 =n 常被 select 覆盖，
 #   只有 defconfig 后逐个 sed 才压得住。
-#   ⚠️ 仅对 a3004ns 生效：dw33d(ath79) 等机型要 wifi，不能全局关 wpad/iwinfo/wireless-regdb。
+#   ⚠️ 仅对 a3004ns 生效：dw33d(ath79) 等机型要 wifi，不能全局关 wpad/wireless-regdb。
+#
+#   ❗ libiwinfo / libiwinfo-lua / libiwinfo-data 绝对不能进这份剔除清单。
+#      它们看着像"无线"，其实是纯用户态库（libiwinfo-lua → libiwinfo → libiwinfo-data，
+#      DEPENDS 只有 libnl-tiny/libuci/libubus/liblua，一个 kmod 都不拉），
+#      而 luci 元包（collections/luci/Makefile:13-16）的 LUCI_DEPENDS 写死了 +libiwinfo-lua。
+#      一旦置 =n，kconfig 求解会把它翻回 =y（与 .config 冲突 → out of sync），
+#      打包阶段却按 .config 不产出该 ipk，最终 package/install 阶段 opkg 报
+#      "cannot find dependency libiwinfo-lua for luci" → Error 255（run 111661978562 实测）。
+#      只保留 iwinfo 命令行工具关闭即可（无人依赖它）。
 TARGET_CONFIG="${TARGET_CONFIG:-}"
 if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns'; then
   echo "==> 检测到 16MB 纯有线机型（$TARGET_CONFIG），追加剔除整个无线子系统"
@@ -75,10 +84,7 @@ wpad-basic-wolfssl \
 wpad-openssl \
 wpad-wolfssl \
 wpad \
-iwinfo \
 wireless-regdb \
-libiwinfo \
-libiwinfo-lua \
 "
   # -------------------------------------------------------------------------
   # 整条 USB 链剔除（本机纯有线，明确不用 U 盘）
@@ -151,6 +157,20 @@ luci-app-cpufreq \
   usb_sweep
 fi
 
+# ---------------------------------------------------------------------------
+# 反向清单：必须保持 =y 的包
+#   libiwinfo*：luci 元包硬依赖 libiwinfo-lua，且三者均为纯用户态库（不拉 kmod）。
+#   这里显式拉回 =y，与 kconfig 的依赖求解结果保持一致 —— .config 与 make 视图
+#   一旦分歧，就会在 package/install 阶段炸 opkg（见文件头部说明）。
+# ---------------------------------------------------------------------------
+FORCE_ON="libiwinfo libiwinfo-lua libiwinfo-data"
+
+# 把最终剔除清单导出，供 CI 的「配置一致性校验」逐步核对
+#（该步骤据此判断：被我们强制 =n 的符号，是否被 kconfig 求解又翻回 y/m）
+FORCE_OFF_LIST="${FORCE_OFF_LIST:-/tmp/force-off.list}"
+printf '%s\n' $FORCE_OFF | sed '/^$/d' | sort -u > "$FORCE_OFF_LIST"
+echo "==> 剔除清单已导出：$FORCE_OFF_LIST（$(grep -c . "$FORCE_OFF_LIST") 项）"
+
 for p in $FORCE_OFF; do
   sed -i "s/^CONFIG_PACKAGE_${p}=[ym]/CONFIG_PACKAGE_${p}=n/" .config
   if ! grep -qE "^CONFIG_PACKAGE_${p}=" .config && ! grep -q "^# CONFIG_PACKAGE_${p} is not set" .config; then
@@ -172,6 +192,12 @@ done
 if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns'; then
   usb_sweep
 fi
+
+# 反向强制 =y（见 FORCE_ON 定义处说明）
+for p in $FORCE_ON; do
+  sed -i "s/^CONFIG_PACKAGE_${p}=.*/CONFIG_PACKAGE_${p}=y/" .config
+  grep -q "^CONFIG_PACKAGE_${p}=" .config || echo "CONFIG_PACKAGE_${p}=y" >> .config
+done
 
 # 硬件 offload 反向强制 =y：本机自用明确启用（config 里已 =y，这里兜底防被压回 =n）
 #   kmod-ipt-offload → xt_FLOWOFFLOAD（含 --hw）
@@ -195,12 +221,19 @@ grep -E '^CONFIG_PACKAGE_libopenssl=|^CONFIG_PACKAGE_libustream-openssl=|^CONFIG
 # ---------------------------------------------------------------------------
 if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns'; then
   echo "--- [16MB 机型] 无线子系统复核（出现 =y/=m 即会超预算）---"
-  BAD=$(grep -E '^CONFIG_PACKAGE_(kmod-mt76|kmod-mac80211|kmod-cfg80211|kmod-mt7602e|kmod-mt7612e|wpad|iwinfo|libiwinfo|wireless-regdb)[^=]*=[ym]' .config || true)
+  #   libiwinfo* 是纯用户态库且被 luci 硬依赖，不算无线驱动，必须排除在检查之外
+  BAD=$(grep -E '^CONFIG_PACKAGE_(kmod-mt76|kmod-mac80211|kmod-cfg80211|kmod-mt7602e|kmod-mt7612e|wpad|wireless-regdb)[^=]*=[ym]|^CONFIG_PACKAGE_iwinfo=[ym]' .config || true)
   if [ -n "$BAD" ]; then
     echo "$BAD"
     echo "!! 警告：仍有无线包被选中，实际体积会超 16MB 预算"
   else
     echo "OK：无线相关包全部未选中"
+  fi
+  echo "--- [16MB 机型] libiwinfo 三件套复核（必须 =y：luci 元包硬依赖 libiwinfo-lua）---"
+  if grep -qE '^CONFIG_PACKAGE_libiwinfo-lua=y' .config; then
+    grep -E '^CONFIG_PACKAGE_(libiwinfo|libiwinfo-lua|libiwinfo-data)=' .config
+  else
+    echo "!! 错误：libiwinfo-lua 未置 y，package/install 阶段 opkg 会报 cannot find dependency libiwinfo-lua for luci"
   fi
   echo "--- [16MB 机型] 代理链复核（应均为 =y）---"
   grep -E '^CONFIG_PACKAGE_(xray-core|luci-app-ssr-plus|chinadns-ng|iptables-mod-socket|dnsmasq-full)=' .config
