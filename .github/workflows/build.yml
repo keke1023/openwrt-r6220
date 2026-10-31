@@ -23,7 +23,7 @@ env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt   # 主源码：immortalwrt（自带 luci-app-ngrokc / ngrokc / luci-app-frpc）
   REPO_BRANCH: openwrt-23.05
   DIY_P1_SH: scripts/diy-part1.sh     # 更新 feeds 之前执行：添加第三方源
-  DIY_GOLANG_SH: scripts/diy-golang.sh # feeds update 之后、install 之前：升级 Golang 工具链（16MB 机型 Go 1.22 编 xray v1.8.4；23.05/master Go 1.26 编最新 xray）
+  DIY_GOLANG_SH: scripts/diy-golang.sh # feeds update 之后、install 之前：升级 Golang 工具链（16MB 机型 Go 1.22 编 xray v1.8.24；23.05/master Go 1.26 编最新 xray）
   DIY_P2_SH: scripts/diy-part2.sh     # 编译之前执行：改默认管理 IP 等
   TZ: Asia/Shanghai
 
@@ -155,7 +155,7 @@ jobs:
         env:
           SOURCE_BRANCH: ${{ inputs.source_branch || env.REPO_BRANCH }}
           # 机型名（如 a3004ns-dual.config）：diy-part1 据此对 16MB 小闪存机型
-          # pin helloworld 到 a201839（xray v1.8.4），大闪存机型仍走 master 最新
+          # pin helloworld 到 a201839（luci 保持 reality 完整），xray 随后前移到 v1.8.24；大闪存机型仍走 master 最新
           TARGET_CONFIG: ${{ matrix.config }}
         run: |
           cd openwrt
@@ -165,7 +165,7 @@ jobs:
       - name: 更新并安装 feeds
         env:
           SOURCE_BRANCH: ${{ inputs.source_branch || env.REPO_BRANCH }}
-          # 机型名：diy-golang 据此选 Go 大版本（16MB 机型用 22.x 编 xray v1.8.4，其余 26.x）
+          # 机型名：diy-golang 据此选 Go 大版本（16MB 机型用 22.x 编 xray v1.8.24，其余 26.x）
           TARGET_CONFIG: ${{ matrix.config }}
         run: |
           cd openwrt

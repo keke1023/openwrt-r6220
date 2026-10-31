@@ -63,8 +63,11 @@ echo "==> helloworld 已就绪，luci-app-ssr-plus 来自：package/helloworld/l
 #      对照：reality 首次入库是 8fc1f6a(2023-03-11)，分享链接支持是 2c9d29d(2023-03-25)，
 #      a201839 远晚于两者，功能完整。
 #   2) 体积最优 —— 官方 mips32le release 对比：
-#        v1.8.4 = 18.19MiB < v1.8.8 = 20.01MiB < v24.12.31 = 21.11MiB < v26.10.29 = 23.54MiB
+#        v1.8.4 = 18.19MiB < v1.8.8 = 20.01MiB < v24.12.31 = 21.11MiB
+#        < v1.8.24 = 21.28MiB < v26.10.29 = 23.54MiB
 #      strip 进 squashfs 后约 4.8MiB vs 7.5MiB，正好是小闪存能不能装下的分水岭。
+#      （pin 到 a201839 后，下方还会把 xray-core 单独前移到 1.8 系最终版 v1.8.24，
+#        换取 REALITY/Vision 的 bug 修复，代价约 +0.8MiB。）
 #   3) xray v1.8.4 的 go.mod 要求 Go 1.20/1.21 → diy-golang.sh 对本机型降到 Go 1.22，
 #      比 master 线要求的 Go 1.26 更省宿主编译时间（且 1.22 编出的二进制更小）。
 #
@@ -79,7 +82,7 @@ if [ -n "$SMALL_FLASH_PATTERNS" ] && [ -n "$PIN_COMMIT" ]; then
   for pat in $SMALL_FLASH_PATTERNS; do
     case "$TARGET_CONFIG" in
       $pat)
-        echo "==> 小闪存机型（$TARGET_CONFIG）：pin helloworld 到 $PIN_COMMIT（xray v1.8.4，reality 完整可用）"
+        echo "==> 小闪存机型（$TARGET_CONFIG）：pin helloworld 到 $PIN_COMMIT（luci 保持 reality 完整），xray 随后前移到 v1.8.24"
         if git -C package/helloworld checkout -q "$PIN_COMMIT"; then
           echo "==> 已切换到 $(git -C package/helloworld log -1 --format='%h %ad %s' --date=short)"
         else
@@ -115,6 +118,40 @@ else
   echo "!! 未找到 $SSRP_MK，跳过 Rust 剥离（请确认 helloworld 源已就位）"
 fi
 
+# ---------------------------------------------------------------------------
+# 小闪存机型：把 xray-core 单独前移到 1.8 系最终版 v1.8.24（2024-08-30）
+#
+# 为什么只换 xray、不动 luci：a201839 这套 luci-app-ssr-plus 的 reality/vision
+# 字段已齐全、18.06 的 Lua CBI 也能跑；换 luci 会引入 luci-compat / nftables 等
+# 新依赖，风险远大于收益。所以 pin 住 luci，只改 xray-core 的版本与哈希。
+#
+# 体积实测（官方 mips32le release zip，与 squashfs 压缩率同源可比）：
+#   v1.8.4 = 18.19MiB → v1.8.8 = 20.01MiB → v1.8.24 = 21.28MiB（+17%）
+#   折算 squashfs 里约 4.8MiB → 5.6MiB，镜像约 +0.8MiB，
+#   即 13057k → 约 13880k，overlay 由 3.0MiB 降到约 2.2MiB。
+#   仍在 16128k 预算内，但余量不多：刷完不要再追加合计超过 0.5MiB 的包。
+# go.mod 要求 go 1.21.4，本机型用 Go 22.x（sbwml golang 22.x 分支）满足。
+# ---------------------------------------------------------------------------
+XRAY_MK="package/helloworld/xray-core/Makefile"
+XRAY_PIN_VER="1.8.24"
+XRAY_PIN_HASH="86e3e388c77cda4d8457a607356416c201c1f18bbed53f0a9e76a228508ff298"
+if [ -n "${PINNED:-}" ] && [ -f "$XRAY_MK" ]; then
+  XRAY_CUR=$(grep -m1 '^PKG_VERSION:=' "$XRAY_MK" | cut -d'=' -f2)
+  if [ "$XRAY_CUR" = "$XRAY_PIN_VER" ]; then
+    echo "==> xray-core 已是 v$XRAY_PIN_VER，跳过版本前移"
+  else
+    sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$XRAY_PIN_VER/" "$XRAY_MK"
+    sed -i "s/^PKG_HASH:=.*/PKG_HASH:=$XRAY_PIN_HASH/" "$XRAY_MK"
+    echo "==> xray-core 版本前移：v${XRAY_CUR:-?} -> v$XRAY_PIN_VER（1.8 系最终版）"
+    if ! grep -q "^PKG_VERSION:=$XRAY_PIN_VER" "$XRAY_MK" || \
+       ! grep -q "^PKG_HASH:=$XRAY_PIN_HASH" "$XRAY_MK"; then
+      echo "!! 错误：xray-core Makefile 的版本/哈希替换失败，请人工检查 $XRAY_MK"
+      exit 1
+    fi
+  fi
+  grep -E '^PKG_(VERSION|HASH):' "$XRAY_MK" | sed 's/^/    /'
+fi
+
 # 自检：确认 xray-core 版本与 ssr-plus 存在
 XRAY_VER=$(grep -m1 'PKG_VERSION:=' package/helloworld/xray-core/Makefile 2>/dev/null | cut -d'=' -f2)
 echo "==> xray-core 当前锁定版本：v${XRAY_VER:-未知}"
@@ -125,7 +162,7 @@ fi
 # 小闪存机型体积复核：xray 主版本必须落在 1.8.x，否则 16MB 放不下
 if [ -n "${PINNED:-}" ]; then
   case "$XRAY_VER" in
-    1.8.*) echo "==> 体积检查通过：xray v$XRAY_VER 进 squashfs 约 4.8MiB，符合 16MB 预算" ;;
+    1.8.*) echo "==> 体积检查通过：xray v$XRAY_VER 进 squashfs 约 4.8~5.6MiB，符合 16MB 预算" ;;
     *)     echo "!! 错误：pin 未生效（xray=$XRAY_VER），超出 16MB 预算，已中止"; exit 1 ;;
   esac
 fi

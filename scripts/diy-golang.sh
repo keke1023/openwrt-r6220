@@ -35,8 +35,8 @@ fi
 
 # 按机型选 Go 大版本：
 #   - 默认（23.05/master/大闪存）：Go 1.26 —— helloworld master 最新 xray v25/v26 的 go.mod 要求 1.25+/1.26
-#   - 16MB 小闪存（a3004ns 等，pin 到 xray v1.8.4）：Go 1.22 —— v1.8.4 的 go.mod 只要求 go 1.20，
-#     用 1.22 足够；新版 Go 编出的二进制更大，且宿主 bootstrap 更慢，没必要。
+#   - 16MB 小闪存（a3004ns 等，pin 到 xray v1.8.24）：Go 1.22 —— v1.8.24 的 go.mod 要求
+#     go 1.21.4，用 1.22 即可满足；新版 Go 编出的二进制更大、宿主 bootstrap 更慢，没必要。
 GOLANG_BRANCH="26.x"
 case "$TARGET_CONFIG" in
   *a3004ns*) GOLANG_BRANCH="22.x" ;;
