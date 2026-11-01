@@ -33,18 +33,32 @@ if [ ! -d "feeds/packages/lang" ]; then
   exit 1
 fi
 
-# 按机型选 Go 大版本：
-#   - 默认（23.05/master/大闪存）：Go 1.26 —— helloworld master 最新 xray v25/v26 的 go.mod 要求 1.25+/1.26
-#   - 16MB 小闪存（a3004ns 等，pin 到 xray v1.8.24）：Go 1.22 —— v1.8.24 的 go.mod 要求
-#     go 1.21.4，用 1.22 即可满足；新版 Go 编出的二进制更大、宿主 bootstrap 更慢，没必要。
+# 按「本次实际要编的 xray-core 版本」选 Go 大版本（不再按机型名硬编码 —— 之前只写了
+# a3004ns，新加的 k2p 走同样 pin 却拿到 Go 1.26，链接直接失败）：
+#   - xray 1.8.x（小闪存机型 pin helloworld a201839 后前移到 v1.8.24）：Go 1.22
+#     v1.8.24 的 go.mod 要求 go 1.21.4，1.22 满足；更关键的是它依赖的 sagernet/sing
+#     用 //go:linkname 引用 net.errNoSuchInterface，该符号在 Go 1.24+ 已被移除，
+#     用 Go 1.26 编必然报 link: invalid reference to net.errNoSuchInterface。
+#   - xray 25/26.x（helloworld master 最新）：Go 1.26（go.mod 要求 1.25+/1.26）
+# 本脚本跑在 DIY-P1 之后（helloworld 已 clone 并完成 xray pin/前移），故版本可直接读文件。
+GOLANG_SRC_REPO="https://github.com/sbwml/packages_lang_golang.git"
+XRAY_MK_HOST="package/helloworld/xray-core/Makefile"
+XRAY_VER="$(grep -m1 '^PKG_VERSION:=' "$XRAY_MK_HOST" 2>/dev/null | cut -d'=' -f2)"
 GOLANG_BRANCH="26.x"
-case "$TARGET_CONFIG" in
-  *a3004ns*) GOLANG_BRANCH="22.x" ;;
+GOLANG_REASON="xray 25/26.x（helloworld master 最新）"
+case "$XRAY_VER" in
+  1.*) GOLANG_BRANCH="22.x"; GOLANG_REASON="xray v$XRAY_VER（小闪存 pin 线，sing 依赖 Go<1.24）" ;;
 esac
+echo "==> 机型 $TARGET_CONFIG 的 xray-core 版本：v${XRAY_VER:-未知} → 选 $GOLANG_BRANCH（$GOLANG_REASON）"
 
-# 分支存在性兜底：sbwml 仓库若已删旧分支，退回 26.x 并在日志里显式告警，避免构建直接失败
-if ! git ls-remote --heads https://github.com/sbwml/packages_lang_golang.git "$GOLANG_BRANCH" 2>/dev/null | grep -q .; then
-  echo "!! 警告：sbwml/packages_lang_golang 的 $GOLANG_BRANCH 分支不可用，回退 26.x"
+# 分支存在性兜底：22.x 不可用时绝不回退 26.x（回退必然链接失败，白烧一小时），直接终止
+if ! git ls-remote --heads "$GOLANG_SRC_REPO" "$GOLANG_BRANCH" 2>/dev/null | grep -q .; then
+  echo "!! 错误：$GOLANG_SRC_REPO 的 $GOLANG_BRANCH 分支不可用"
+  if [ "$GOLANG_BRANCH" = "22.x" ]; then
+    echo "!! xray v$XRAY_VER 不能用 Go 1.26 编译（net.errNoSuchInterface 已移除），回退必失败，故终止"
+    exit 1
+  fi
+  echo "!! 回退 26.x"
   GOLANG_BRANCH="26.x"
 fi
 
@@ -53,7 +67,7 @@ echo "==> 当前自带 golang 版本："
 grep -E "^PKG_VERSION|^GO_VERSION" feeds/packages/lang/golang/golang/Makefile 2>/dev/null | head -3 || echo "  (无法读取旧版本)"
 
 rm -rf feeds/packages/lang/golang
-git clone --depth 1 -b "$GOLANG_BRANCH" https://github.com/sbwml/packages_lang_golang.git feeds/packages/lang/golang
+git clone --depth 1 -b "$GOLANG_BRANCH" "$GOLANG_SRC_REPO" feeds/packages/lang/golang
 if [ ! -f "feeds/packages/lang/golang/golang/Makefile" ]; then
   echo "!! 错误：golang 包替换失败，feeds/packages/lang/golang/golang/Makefile 不存在"
   exit 1
