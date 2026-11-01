@@ -441,13 +441,14 @@ jobs:
           # 且至少留 1MiB 给 overlay（配置/日志/opkg 都写在 overlay 上）。
           #   分区大小来自设备定义 IMAGE_SIZE：
           #     a3004ns-dual = 16128k（DTS: reg = <0x40000 0xfc0000>）
-          #     phicomm_k2p  = 15744k（DTS: reg = <0xa0000 0xf60000>，少 384k）
+          #     phicomm_k2p  = 16064k（diy-part2 第19段覆盖 DTS 为 reg = <0x50000 0xfb0000>，
+          #                            弃用原厂 permanent_config 换回 320k）
           if echo "${{ matrix.config }}" | grep -qE '^(a3004ns-dual|k2p)\.config$'; then
             SYS=$(ls -1 *squashfs-sysupgrade.bin 2>/dev/null | head -1)
             [ -z "$SYS" ] && { echo "!! 未找到 squashfs-sysupgrade 镜像"; exit 1; }
             SZ=$(stat -c%s "$SYS")
             if echo "${{ matrix.config }}" | grep -qE '^k2p\.config$'; then
-              LIMIT=$((15744*1024)); LIMITK=15744
+              LIMIT=$((16064*1024)); LIMITK=16064
             else
               LIMIT=$((16128*1024)); LIMITK=16128
             fi
