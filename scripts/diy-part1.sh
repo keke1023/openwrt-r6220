@@ -75,10 +75,12 @@ echo "==> helloworld 已就绪，luci-app-ssr-plus 来自：package/helloworld/l
 #    把下面 PIN_COMMIT 改成空串（走 master 最新）；但注意本机型已在 config 里
 #    关闭整条 USB 链（无 extroot 退路），走 master 最新 xray 会撑爆 16MB 分区，
 #    届时必须同时把 USB 那几个包回开才有可行解。
-# 16MB SPI NOR 机型清单（模糊匹配 config 基名）：
-#   a3004ns-dual  —— 纯有线（无线全关）
-#   k2p           —— 带开源 mt76 无线（mt7615e），比 a3004ns 更吃紧，同样必须 pin
-SMALL_FLASH_PATTERNS="*a3004ns* *k2p*"
+# 16MB SPI NOR 机型清单（**精确匹配 config 基名**，不用通配）：
+#   a3004ns-dual.config —— 纯有线（无线全关）
+#   k2p.config          —— 带开源 mt76 无线（mt7615e），比 a3004ns 更吃紧，同样必须 pin
+# ⚠️ 这里必须写精确名：早期写成 *k2p*，会把 23.05 的 phicomm_k2p-32m.config（32MB，
+#    本来该走 master 最新 xray）一起 pin 到 a201839 + 旧 xray，属于误伤。
+SMALL_FLASH_PATTERNS="a3004ns-dual.config k2p.config"
 PIN_COMMIT="a201839"
 
 if [ -n "$SMALL_FLASH_PATTERNS" ] && [ -n "$PIN_COMMIT" ]; then
