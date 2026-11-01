@@ -346,15 +346,33 @@ if echo "$TARGET_CONFIG" | grep -qiE 'k2p'; then
     echo "OK：闭源 kmod-mt7615d / luci-app-mtwifi 均未选中"
   fi
 
-  echo "--- [K2P] ssr-plus 客户端选型复核（必须 NONE，libev 已关）---"
-  grep -E '^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_(NONE|Libev)_Client=' .config \
-    || echo "（未出现在 .config，说明 choice 用了默认值 —— mipsel 上默认是 Libev，需显式写 NONE）"
-
   echo "--- [K2P] PPPoE 复核（当主路由拨号用）---"
   grep -E '^CONFIG_PACKAGE_(ppp|ppp-mod-pppoe)=' .config || echo "（未选中：本机将无法 PPPoE 拨号，只适合做 AP/旁路由）"
 
   echo "--- [K2P] 瘦身项复核 ---"
   grep -E '^CONFIG_PACKAGE_(kmod-nf-nathelper-extra|ubi-utils)=' .config || true
-  grep -E '^CONFIG_PACKAGE_(shadowsocks-libev-ss-redir|shadowsocks-libev-ss-local|dns2socks|dns2tcp|microsocks)=' .config \
-    || echo "OK：ssr-plus 未用协议二进制均未选中"
+fi
+
+# ---------------------------------------------------------------------------
+# 16MB 机型共用复核：ssr-plus 的 Shadowsocks(libev) 客户端必须在
+# ---------------------------------------------------------------------------
+# 2026-11-01 起两份 config 都显式选 Libev_Client（ss 协议保留可用）。
+# 这里只做提示，不 exit 1 —— 真正致命的判断交给 CI 的「配置一致性校验 / 校验 D」。
+# ⚠️ Client 是 kconfig choice：一旦 NONE_Client 与 Libev_Client 同时 =y，
+#    解析时只有一个生效，另一个会触发 “out of sync”。
+if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns|k2p'; then
+  echo "--- ssr-plus 客户端选型复核（期望 Libev，ss 协议可用）---"
+  grep -E '^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_(NONE|Libev)_Client=' .config || echo "（choice 尚未落盘）"
+
+  echo "--- ss 协议二进制复核 ---"
+  SSMISS=""
+  for p in shadowsocks-libev-ss-local shadowsocks-libev-ss-redir libsodium libev \
+           dns2socks dns2tcp microsocks shadowsocksr-libev-ssr-check; do
+    grep -qE "^CONFIG_PACKAGE_${p}=y$" .config || SSMISS="$SSMISS $p"
+  done
+  if [ -n "$SSMISS" ]; then
+    echo "   (暂未出现，可能尚未 defconfig，属正常)：$SSMISS"
+  else
+    echo "OK：ss-local / ss-redir / libsodium / libev / dns2socks / dns2tcp / microsocks / ssr-check 全部=y"
+  fi
 fi

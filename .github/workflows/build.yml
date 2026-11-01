@@ -347,6 +347,30 @@ jobs:
           done
           echo "OK：libiwinfo 三件套齐备（luci 硬依赖已满足）"
 
+          # ---- 校验 D：ss 客户端必须真的被选中 ----
+          # 背景：ssr-plus 187-2 把 Shadowsocks Client 做成了 kconfig choice，
+          #   默认值在 mipsel 上是 Libev_Client。config 里若误写 NONE_Client=y，
+          #   ss-local/ss-redir 会静默消失 —— 编译不报错，刷进机器却发现 ss 节点起不来。
+          #   这里用解析后的视图判一次，避免「能编、功能没了」这种最贵的失败。
+          if echo "$CFG" | grep -qiE 'a3004ns|k2p'; then
+            if ! grep -qE '^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Libev_Client=y$' /tmp/resolved.config; then
+              echo "!! 失败：Shadowsocks-libev 客户端未被选中（ss 协议将不可用）"
+              echo "   排查：config 里是否残留 INCLUDE_Shadowsocks_NONE_Client=y（choice 互斥）"
+              grep -E '^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_' /tmp/resolved.config || true
+              exit 1
+            fi
+            if grep -qE '^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_NONE_Client=y$' /tmp/resolved.config; then
+              echo "!! 失败：NONE_Client 与 Libev_Client 同时 =y —— choice 只能二选一，必然 out of sync"
+              exit 1
+            fi
+            for p in shadowsocks-libev-ss-local shadowsocks-libev-ss-redir libsodium libev; do
+              grep -qE "^CONFIG_PACKAGE_${p}=y$" /tmp/resolved.config \
+                || echo "   (注意) CONFIG_PACKAGE_${p} 未出现 =y，若功能异常先查这里"
+            done
+            echo "OK：ss 客户端（libev）已选中，ss-local/ss-redir 依赖链完整"
+          fi
+
+
           echo "OK：剔除项在 kconfig 解析后仍未选中，.config 与 make 的视图一致"
 
       - name: 诊断：dump 实际生效配置与已选大包

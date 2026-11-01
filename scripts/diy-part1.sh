@@ -122,27 +122,20 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 16MB 机型：剥离 ssr-plus 里「无条件安装但本机用不到」的协议二进制
+# ssr-plus 的协议依赖：**保持完整**（2026-11-01 回滚此前的瘦身）
 # ---------------------------------------------------------------------------
-# 187-2 的 LUCI_DEPENDS 有一长串**无条件** + 依赖，与是否启用对应协议无关：
+# 187-2 的 LUCI_DEPENDS 里有一串**无条件** + 依赖，与是否启用对应协议无关：
 #     +dns2socks +dns2tcp +microsocks +shadowsocksr-libev-ssr-check
-# 它们只服务于：DNS2SOCKS / DNS2TCP 端口转发、局域网 Socks5 共享（microsocks）、
-# SSR 节点连通性检测（ssr-check）。本机型只跑 xray（vless/reality），装了也不会执行。
-# 做法：只删这几个依赖词，不碰其余依赖（DEPENDS 是多行 \ 续行，整行删除会破坏语法）。
-# 注：想保留某项时把对应的 s/+xxx//g 删掉即可。
-#
-# ⚠️ 另一半瘦身不在这里做，而是靠 config 里的 INCLUDE_Shadowsocks_NONE_Client=y ——
-#    ss-local/ss-redir 是**条件依赖**（+PACKAGE_..._INCLUDE_Shadowsocks_Libev_Client:xxx），
-#    但那个 choice 在 mipsel 上的默认选项就是 Libev（不是 None），只在 config 里写
-#    Libev=n 根本压不住，必须显式选 NONE。两者合计约 250KB 安装体积。
-if [ -n "${PINNED:-}" ] && [ -f "$SSRP_MK" ]; then
-  echo "==> 16MB 机型（$TARGET_CONFIG）：剥离 ssr-plus 未使用的协议依赖（dns2socks/dns2tcp/microsocks/ssr-check）"
-  sed -i -E 's/\+dns2socks\b//g; s/\+dns2tcp\b//g; s/\+microsocks\b//g; s/\+shadowsocksr-libev-ssr-check\b//g' "$SSRP_MK"
-  if grep -qE '\+(dns2socks|dns2tcp|microsocks|shadowsocksr-libev-ssr-check)' "$SSRP_MK"; then
-    echo "!! 错误：协议依赖剥离失败，请人工检查 $SSRP_MK 的 LUCI_DEPENDS"
-    exit 1
-  fi
-  echo "==> 已剥离；当前 ssr-plus 依赖行："
+# 上一版为了省 ~100KB 用 sed 把它们删了；现在恢复，原因：
+#   - ss 协议仍可能用到，而 dns2socks / dns2tcp 正是 ss 节点的 UDP-DNS 转发后端
+#     （xray 走内置 DNS，ss 走这两个二进制）；
+#   - microsocks 是「局域网共享」入口，ssr-check 是节点连通性检测；
+#   - 删掉后 UI 上仍显示这些选项，点了没反应 —— 功能残缺比省 100KB 更难受。
+# 这四项安装体积合计约 100KB，进 squashfs 约 35KB，不值得为此破坏功能完整性。
+# 若将来确实要再瘦：把下面 echo 换成
+#   sed -i -E 's/\+dns2socks\b//g; s/\+dns2tcp\b//g; s/\+microsocks\b//g; s/\+shadowsocksr-libev-ssr-check\b//g' "$SSRP_MK"
+if [ -f "$SSRP_MK" ]; then
+  echo "==> ssr-plus 协议依赖（保持完整，不做剥离）："
   sed -n '/^LUCI_DEPENDS:=/,/^$/p' "$SSRP_MK" | sed 's/^/    /'
 fi
 

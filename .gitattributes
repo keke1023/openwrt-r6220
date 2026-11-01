@@ -1,0 +1,20 @@
+# 行尾统一交给 git 管，避免「Windows 上编辑 → CI 上报 $'\r': command not found」
+#
+# 背景：本仓库主要在 Windows（core.autocrlf=true）上编辑，而构建跑在
+# GitHub Actions 的 Ubuntu 上。core.autocrlf=true 会在 checkout 时把工作区
+# 变成 CRLF，脚本一 push 就带 \r —— bash 解释首行会直接报错，YAML 里则会让
+# matrix 参数尾部多一个不可见字符（表现成「配置名对不上」这种玄学问题）。
+# 这里显式钉死 LF，覆盖 autocrlf 的行为（已验证仓库内所有 blob 本来就是 LF，
+# 加这条不会产生 renormalize diff）。
+*                text=auto eol=lf
+*.sh             text eol=lf
+*.config         text eol=lf
+*.yml            text eol=lf
+*.yaml           text eol=lf
+*.md             text eol=lf
+
+# 二进制产物不参与行尾转换
+*.bin            binary
+*.gz             binary
+*.ipk            binary
+*.png            binary
