@@ -923,3 +923,61 @@ PYEOF
 else
   echo "==> [19] 非 K2P 16M 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 firmware 起点调整"
 fi
+
+# ===========================================================================
+# 20) K2P(16M) 体积瘦身：给 luci-app-ngrokc 腾地方
+# ---------------------------------------------------------------------------
+# 加 ngrokc 的真实成本不止它自己：DEPENDS 有 +libstdcpp +libopenssl +zlib，
+#   其中 libstdcpp 当前不在镜像里（≈700K 安装 / ≈300K squashfs），这才是大头。
+# 空间从下面四处挤，都可逆、都能在日志里逐条核对：
+#
+#   ① ssr-plus 的 +coreutils 删掉（保留 +coreutils-base64）
+#        helloworld 的 LUCI_DEPENDS 同时写了 +coreutils +coreutils-base64；
+#        coreutils 主包是完整 GNU 工具集（≈1.3M 安装），而 ssr-plus 脚本实际只用到
+#        base64（coreutils-base64 单独提供），timeout/stat/head 等 busybox 都有。
+#        → 省 ≈450K squashfs（本次最大一刀）
+#   ② ssr-plus 的 +ip-full 改成 +ip-tiny
+#        tproxy 只用到 `ip rule add fwmark` + `ip route add local ... table`，ip-tiny 全支持；
+#        连带甩掉 ip-full 独有的 libbpf0 + libelf1（≈300K 安装）。
+#        → 省 ≈200K squashfs
+#   ③ mt7621 target.mk 的 FEATURES 去掉 nand
+#        FEATURES+=nand 会让 include/target.mk 把 ubi-utils 塞进 DEFAULT_PACKAGES，
+#        所以 .config 写 CONFIG_PACKAGE_ubi-utils=n 会被 select 覆盖回 =y（上一版实测确认）。
+#        K2P 是 16MB SPI NOR、没有 UBI 卷，去掉无副作用。
+#        → 省 ≈60K squashfs
+#   ④ kmod-mppe 显式关掉（PPPoE 不需要 MPPE，那是 PPTP/VPN 的加密）
+#        → 省 ≈15K squashfs
+#
+# ⚠️ 唯一有行为变化的是 ①：若 ssr-plus 某个子功能偷偷用了 coreutils 独有命令，
+#    该功能会报 command not found（不影响主流程、不会变砖）。构建日志的
+#    「配置一致性校验」会 dump 最终 .config，可确认 coreutils 已不在。
+# ⚠️ 顺序前提：本段必须在 `make defconfig` 之前跑（diy-part2 正好在 feeds install
+#    之后、defconfig 之前），否则依赖变更不生效。
+# ===========================================================================
+if echo "${TARGET_CONFIG:-}" | grep -qE '^k2p\.config$'; then
+  echo "==> [20] K2P(16M) 体积瘦身：为 luci-app-ngrokc 腾空间"
+  SSRP_MK="package/helloworld/luci-app-ssr-plus/Makefile"
+  MT7621_TMK="target/linux/ramips/mt7621/target.mk"
+
+  if [ -f "$SSRP_MK" ]; then
+    sed -i 's/+coreutils +coreutils-base64/+coreutils-base64/' "$SSRP_MK"
+    sed -i 's/+ip-full /+ip-tiny /' "$SSRP_MK"
+    echo "  已改 $SSRP_MK 依赖，结果："
+    grep -nE '\+coreutils|\+ip-tiny|\+ip-full' "$SSRP_MK" | head -4 | sed 's/^/     /'
+  else
+    echo "  !! 错误：找不到 $SSRP_MK"
+    exit 1
+  fi
+
+  if [ -f "$MT7621_TMK" ]; then
+    if grep -q '^FEATURES+=nand ramdisk rtc usb minor' "$MT7621_TMK"; then
+      sed -i 's/^FEATURES+=nand ramdisk rtc usb minor/FEATURES+=ramdisk rtc usb minor/' "$MT7621_TMK"
+      echo "  $MT7621_TMK：FEATURES 去掉 nand（避免 DEFAULT_PACKAGES 拉入 ubi-utils）"
+    else
+      echo "  $MT7621_TMK：FEATURES 行与预期不符，跳过（需人工核对）"
+    fi
+    grep -n '^FEATURES+=' "$MT7621_TMK" | sed 's/^/     /'
+  fi
+else
+  echo "==> [20] 非 K2P 16M 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过体积瘦身"
+fi
