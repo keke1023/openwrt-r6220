@@ -440,7 +440,7 @@ jobs:
           # 仅对 16MB SPI NOR 机型做硬校验：镜像必须小于 firmware 分区，
           # 且至少留 1MiB 给 overlay（配置/日志/opkg 都写在 overlay 上）。
           #   分区大小来自设备定义 IMAGE_SIZE：
-          #     a3004ns-dual = 16128k（DTS: reg = <0xa0000 0xfc0000>）
+          #     a3004ns-dual = 16128k（DTS: reg = <0x40000 0xfc0000>）
           #     phicomm_k2p  = 15744k（DTS: reg = <0xa0000 0xf60000>，少 384k）
           if echo "${{ matrix.config }}" | grep -qE '^(a3004ns-dual|k2p)\.config$'; then
             SYS=$(ls -1 *squashfs-sysupgrade.bin 2>/dev/null | head -1)
