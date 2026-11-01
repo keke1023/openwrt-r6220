@@ -931,14 +931,28 @@ fi
 #   其中 libstdcpp 当前不在镜像里（≈700K 安装 / ≈300K squashfs），这才是大头。
 # 空间从下面四处挤，都可逆、都能在日志里逐条核对：
 #
-#   ① （已撤销，2026-11-01 实证否决）删 ssr-plus 的 +coreutils
-#        原本以为能省 ≈450K，**实际省不到任何东西**，而且删了也会被拉回：
-#          · feeds/packages/utils/coreutils 的 `Package/coreutils/install` 段是 `true`
-#            —— 主包是**空壳**，一个文件都不装，真正的内容全在 coreutils-<applet> 子包里；
-#          · 每个子包由 `GenPlugin` 生成，`DEPENDS:=coreutils ...`（无 + 号 = 硬依赖），
-#            所以只要 ssr-plus 要 coreutils-base64，coreutils 就必然被 defconfig 选上。
-#        ⇒ 保留 `+coreutils +coreutils-base64` 原样不动。当前镜像里 coreutils 组
-#          （主包空壳 + base64 二进制）合计只有 ≈35K，本来就不是大头。
+#   ① 【必须做——不是为省空间，而是为了断 kconfig 环】删 ssr-plus 的 +coreutils
+#        2026-11-01 run 41283679493 事故复盘（这次是真踩坑，记录在此防复发）：
+#          最终 .config 里 `CONFIG_PACKAGE_luci-app-ssr-plus` 这个 symbol **整个消失**，
+#          前端没编，连带 curl / libcurl4 / libsodium / shadowsocks-libev-* / microsocks /
+#          libpcre / libudns / lua-neturl / tcping / resolveip 等 19 个包全丢，
+#          镜像反而「瘦」了 768K —— 体积检查还报「OK：体积在预算内」，典型假成功。
+#          根因是 kconfig 在 defconfig 阶段报错：
+#            error: recursive dependency detected!
+#              symbol PACKAGE_iptables        is selected by PACKAGE_luci-app-ssr-plus  (+iptables)
+#              symbol PACKAGE_luci-app-ssr-plus depends on   PACKAGE_coreutils         (降级产物)
+#              symbol PACKAGE_coreutils       is selected by PACKAGE_luci-app-vssr     (vssr 的 +coreutils)
+#              symbol PACKAGE_luci-app-vssr   depends on    PACKAGE_iptables           (vssr 硬依赖)
+#          helloworld 里 ssr-plus 与 vssr 互相 select，求解失败后 kconfig 直接丢弃
+#          luci-app-ssr-plus 这个 symbol。去掉 ssr-plus 的 +coreutils，上面第 2 条
+#          depends 边即消失，环断开。
+#        ❗ 去掉 +coreutils 既不丢功能、也不省空间（只是拆掉一条依赖边）：
+#          · feeds 的 `Package/coreutils/install` 段是 `true` —— 主包是空壳，不装文件，
+#            真正的内容全在 coreutils-<applet> 子包里；
+#          · 每个子包由 `GenPlugin` 生成，`DEPENDS:=coreutils ...`（无 + 号硬依赖），
+#            所以只要保留 +coreutils-base64，coreutils 依旧会被 defconfig 拉进镜像。
+#          · 上一轮（未加此刀）实测：coreutils 组在镜像里只有 ≈35K，本来就不是大头，
+#            删它得不到空间 —— 它的价值纯粹在于「拆环」。
 #   ② ssr-plus 的 +ip-full 改成 +ip-tiny（已实证安全，不是拍脑袋）
 #        · 功能够用：`package/network/utils/iproute2/patches/170-ip_tiny.patch` 里
 #            { "route",  do_iproute },
@@ -962,9 +976,13 @@ fi
 #        → 省 ≈12K squashfs
 #
 # ⚠️ ②③④ 合起来只有 ≈190K，**不够覆盖 ngrokc 的 ≈400K**（libstdcpp 是大头）。
-#    差额要靠下一轮的另一刀：把 TLS 双栈并成 openssl 单栈
-#    （curl + libustream 都切 openssl，干掉整个 libmbedtls12 ≈250K squashfs）。
-#    那一刀影响面大（涉及 curl/libustream 的 choice），单独一轮验证，不混在这次里。
+#    差额靠 k2p.config 里的 squashfs 块大小 256k→1024k 补（预期省 500~1200K，
+#    见 config-18.06/k2p.config 的「镜像」段），这一项零功能代价、不砍任何包。
+#    ❗ 注意：run 41283679493 报出的「镜像 14592K / overlay 1471K」**不是真实瘦身成果**，
+#       那轮因为上面的 kconfig 环丢了整个 ssr-plus（19 个包），数字虚高。
+#       真实数字必须等本刀修好、ssr-plus 回到镜像之后再取。
+#    ❗ kmod-mppe 写 =n 目前仍未生效（镜像里还在），说明它被 kmod-ppp/pppoe 侧 select
+#       拉回；只有 ≈12K，暂不为它折腾，等体积实在不够再动。
 # ⚠️ 顺序前提：本段必须在 `make defconfig` 之前跑（diy-part2 正好在 feeds install
 #    之后、defconfig 之前），否则依赖变更不生效。
 # ===========================================================================
@@ -974,10 +992,25 @@ if echo "${TARGET_CONFIG:-}" | grep -qE '^k2p\.config$'; then
   MT7621_TMK="target/linux/ramips/mt7621/target.mk"
 
   if [ -f "$SSRP_MK" ]; then
-    # 注意：只动 ip-full，**不动 coreutils**（见上方 ① 的实证说明，删了无效且会被拉回）
+    # ① 断 kconfig 环（**必需**，缺了这条整个 luci-app-ssr-plus 会被 kconfig 丢弃）
+    if grep -q '+coreutils +coreutils-base64' "$SSRP_MK"; then
+      sed -i 's/+coreutils +coreutils-base64/+coreutils-base64/' "$SSRP_MK"
+      echo "  ① 已去掉 +coreutils，断开 ssr-plus ↔ vssr 的 kconfig 循环依赖"
+    else
+      echo "  ① (注意) 未找到 '+coreutils +coreutils-base64'，可能已被上游改过，继续"
+    fi
+    # ② ip-full -> ip-tiny（tproxy 只用 ip rule / ip route，tiny 版保留）
     sed -i 's/+ip-full /+ip-tiny /' "$SSRP_MK"
+
     echo "  已改 $SSRP_MK 依赖，结果："
     grep -nE '\+coreutils|\+ip-tiny|\+ip-full' "$SSRP_MK" | head -4 | sed 's/^/     /'
+    # 硬校验：改完必须还有 coreutils-base64（功能靠它），且 coreutils 主包引用已消失
+    grep -q '+coreutils-base64' "$SSRP_MK" \
+      || { echo "  !! 失败：+coreutils-base64 丢了，订阅解析会缺 base64 命令"; exit 1; }
+    if grep -qE '\+coreutils(\s|$)' "$SSRP_MK"; then
+      echo "  !! 失败：+coreutils 仍存在（sed 未生效），kconfig 环未断开"; exit 1
+    fi
+    echo "  OK：coreutils-base64 保留、+coreutils 已移除（环已断）"
   else
     echo "  !! 错误：找不到 $SSRP_MK"
     exit 1
