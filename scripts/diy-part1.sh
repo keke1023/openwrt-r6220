@@ -208,6 +208,81 @@ if [ -z "$XRAY_VER" ]; then
   echo "!! 警告：未能读取 xray-core 版本，固件可能仍过大"
 fi
 
+# ---------------------------------------------------------------------------
+# 187-2 + xray v1.8.24 专项修复：三处「导入一份订阅，整条代理全挂」的隐患
+#
+# 187-2（a201839）是完整支持 vless+reality+vision 的最老版本，但它不认两个
+# 2024 年后才在订阅里普及的写法。这两处失败方式特别恶劣：不是单个节点失效，
+# 而是 xray 解析 config.json 直接报错退出 → ssr-plus 拉起失败 → 所有节点全不可用。
+#
+#  [A] transport=raw —— 新版 xray 把 tcp 传输改名为 raw，v2rayN 与机场订阅随之
+#      开始下发 type=raw。187-2 只认 tcp，原样写进 config 就是 network="raw"，
+#      而 v1.8.24 的传输枚举里没有 raw（raw 是 v24.9+ 才引入的），
+#      报 `unknown transport protocol: raw`。
+#      → 订阅解析处归一（顺带让 tcp_guise/headerType 分支能正确命中，否则
+#        http 伪装的 headerType 会被静默丢掉）；gen_config.lua 读入 server 后
+#        再兜一层，覆盖 vmess 分享链接、手工 UI 配置、历史已存进 uci 的旧节点。
+#
+#  [B] flow=none —— vless 的 flow 合法值只有 ""/"xtls-rprx-vision"，"none" 会
+#      触发 `unknown flow: none`，同样整份配置拒绝启动。
+#      本机 UI 无此风险：client-config.lua 的 tls_flows 只有 xtls-rprx-vision /
+#      xtls-rprx-vision-udp443 两项，表单根本选不出 none —— 所以 none 只可能
+#      从订阅链接进来。
+#      → 订阅入库前剔除，gen_config.lua 出口再剔一次。
+#
+# 为什么限定 PINNED（=16MB 小闪存=187-2+xray v1.8.24）才打：master 线
+#   （190-3 + xray v26）里 raw 是合法传输名，把 raw 改回 tcp 等于主动降级新特性，
+#   反而有害。本补丁只服务「老 luci 撞上新订阅」这个组合。
+# ---------------------------------------------------------------------------
+if [ -n "${PINNED:-}" ]; then
+  SSRP_DIR="package/helloworld/luci-app-ssr-plus/root/usr/share/shadowsocksr"
+  GEN_CFG="$SSRP_DIR/gen_config.lua"
+  SUB_LUA="$SSRP_DIR/subscribe.lua"
+  echo "==> 187-2 订阅兼容补丁：transport raw→tcp / 剔除 flow=none"
+  MISSING=0
+  for f in "$GEN_CFG" "$SUB_LUA"; do
+    [ -f "$f" ] || { echo "!! 错误：未找到 $f，补丁无处落地"; MISSING=1; }
+  done
+  [ "$MISSING" = "1" ] && exit 1
+
+  # [A-1] 订阅链接 type=raw → tcp
+  grep -q 'result.transport = (params.type == "raw")' "$SUB_LUA" || \
+    sed -i 's|result.transport = params.type or "tcp"|result.transport = (params.type == "raw") and "tcp" or (params.type or "tcp")|' "$SUB_LUA"
+
+  # [A-2] gen_config 兜底归一：插在 server 读入之后，后续所有 transport 判断自动受益
+  grep -q 'server.transport == "raw" then server.transport = "tcp"' "$GEN_CFG" || \
+    sed -i '/^local server = ucursor:get_all("shadowsocksr", server_section)/a if server.transport == "raw" then server.transport = "tcp" end' "$GEN_CFG"
+
+  # [B-1] 订阅里 flow=none / 空串 不入库
+  grep -q 'params.flow ~= "none"' "$SUB_LUA" || \
+    sed -i 's|result.tls_flow = (params.security == "tls" or params.security == "reality") and params.flow or nil|result.tls_flow = ((params.security == "tls" or params.security == "reality") and params.flow ~= "none" and params.flow ~= "") and params.flow or nil|' "$SUB_LUA"
+
+  # [B-2] gen_config 出口再剔一次
+  grep -q 'server.tls_flow ~= "none"' "$GEN_CFG" || \
+    sed -i 's|flow = ((server\.tls == .1.) or (server\.reality == .1.)) and server\.tls_flow or nil|flow = (((server.tls == "1") or (server.reality == "1")) and server.tls_flow ~= "none" and server.tls_flow ~= "") and server.tls_flow or nil|' "$GEN_CFG"
+
+  # 回读校验：sed 静默不匹配是这套流程最大的坑（照常 exit 0，却编出一版没补丁的固件）
+  PATCH_FAIL=0
+  grep -q 'result.transport = (params.type == "raw")' "$SUB_LUA" || { echo "!! [A-1] subscribe raw→tcp 未生效"; PATCH_FAIL=1; }
+  grep -q 'server.transport == "raw" then server.transport = "tcp"' "$GEN_CFG" || { echo "!! [A-2] gen_config raw 归一未生效"; PATCH_FAIL=1; }
+  grep -q 'params.flow ~= "none"' "$SUB_LUA" || { echo "!! [B-1] 订阅 flow=none 未剔除"; PATCH_FAIL=1; }
+  grep -q 'server.tls_flow ~= "none"' "$GEN_CFG" || { echo "!! [B-2] 出口 flow=none 未剔除"; PATCH_FAIL=1; }
+  if [ "$PATCH_FAIL" = "1" ]; then
+    echo "!! 错误：订阅兼容补丁未全部落地，中止 —— 否则会编出「一导入订阅全网就断」的固件"
+    exit 1
+  fi
+
+  # 有 luac 顺带做语法校验（luci 是 Lua 5.1 语法）
+  for LC in luac luac5.1; do
+    if command -v "$LC" >/dev/null 2>&1; then
+      "$LC" -p "$GEN_CFG" && "$LC" -p "$SUB_LUA" || { echo "!! 错误：补丁后 Lua 语法不通过"; exit 1; }
+      echo "    Lua 语法校验通过（$LC -p）"
+      break
+    fi
+  done
+  echo "    已打补丁：raw→tcp（订阅+出口双层）、flow=none 剔除（订阅+出口双层）"
+fi
+
 # 小闪存机型体积复核：xray 主版本必须落在 1.8.x，否则 16MB 放不下
 if [ -n "${PINNED:-}" ]; then
   case "$XRAY_VER" in
