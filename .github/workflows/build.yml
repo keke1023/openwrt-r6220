@@ -371,6 +371,20 @@ jobs:
           fi
 
 
+          # ---- 校验 N：squashfs 块大小（2026-11-01 新增的零功能代价瘦身项）----
+          # k2p.config 里显式写了 CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=1024（默认是 256）。
+          # 块越大 xz 压缩字典越大，镜像普遍小 3~8%。这里硬校验，防止 kconfig 把它
+          # 回落到默认值而我们看不出来（体积检查只会看到镜像偏大，却不知原因）。
+          BS=$(grep -E '^CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=' /tmp/resolved.config | cut -d= -f2)
+          echo "==> squashfs 块大小（kconfig 解析结果）：${BS:-未设置→默认 256} KiB"
+          if [ "${{ matrix.config }}" = "k2p.config" ]; then
+            if [ "${BS:-}" != "1024" ]; then
+              echo "!! 失败：k2p 期望 CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=1024，实际 '${BS:-}'"
+              exit 1
+            fi
+            echo "OK：k2p 的 squashfs 块大小 = 1024 KiB（xz 字典更大，镜像更小）"
+          fi
+
           echo "OK：剔除项在 kconfig 解析后仍未选中，.config 与 make 的视图一致"
 
       - name: 诊断：dump 实际生效配置与已选大包
