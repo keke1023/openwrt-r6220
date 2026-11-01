@@ -371,6 +371,28 @@ jobs:
           fi
 
 
+          # ---- 校验 N-1：核心包必须被 kconfig 真正选中 ----
+          # 2026-11-01：kconfig 遇 recursive dependency 会**静默丢弃** symbol，
+          # .config 里连 `# ... is not set` 都不留一行，看上去一切正常。
+          # 这里显式验证核心包存在，编译前就拦住，别白烧 48 分钟。
+          for p in luci-app-ssr-plus xray-core; do
+            if ! grep -qE "^CONFIG_PACKAGE_${p}=y$" .config; then
+              echo "!! 失败：最终 .config 里没有 CONFIG_PACKAGE_${p}=y"
+              echo "   九成是 kconfig 报 recursive dependency 把 symbol 丢了。"
+              echo "   排查：搜上面的 'recursive dependency detected' 链条，"
+              echo "   典型是 luci-app-ssr-plus → coreutils ← luci-app-vssr → iptables 环，"
+              echo "   修法见 scripts/diy-part2.sh 第 [20] 段 ①（去掉 +coreutils）。"
+              exit 1
+            fi
+          done
+          if echo "${{ matrix.config }}" | grep -qE '^k2p\.config$'; then
+            for p in luci-app-ngrokc ngrokc; do
+              grep -qE "^CONFIG_PACKAGE_${p}=y$" .config \
+                || { echo "!! 失败：k2p 期望 $p=y，最终 .config 里没有"; exit 1; }
+            done
+            echo "OK：核心包已选中（luci-app-ssr-plus / xray-core / luci-app-ngrokc / ngrokc）"
+          fi
+
           # ---- 校验 N：squashfs 块大小（2026-11-01 新增的零功能代价瘦身项）----
           # k2p.config 里显式写了 CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=1024（默认是 256）。
           # 块越大 xz 压缩字典越大，镜像普遍小 3~8%。这里硬校验，防止 kconfig 把它
@@ -462,6 +484,31 @@ jobs:
             done
             echo "==> 单包合计：$(ls -1 packages/*.ipk 2>/dev/null | wc -l) 个包，$(du -sk packages 2>/dev/null | cut -f1) KiB"
           fi
+          # ── 核心功能包必须在 manifest 里（防「构建成功但功能整块丢失」的假成功）──
+          # 2026-11-01 run 41283679493 事故：kconfig 报 recursive dependency
+          #   （ssr-plus → coreutils ← vssr → iptables ← ssr-plus），求解失败后直接把
+          #   PACKAGE_luci-app-ssr-plus 这个 symbol 丢掉 —— 前端 + curl + shadowsocks-libev
+          #   + libsodium 等 19 个包全没进镜像。而体积检查只看到「镜像变小了 → OK」，
+          #   属于最危险的假成功。此闸门专门拦这一种。
+          MAN=$(ls -1 *.manifest 2>/dev/null | head -1)
+          [ -z "$MAN" ] && { echo "!! 失败：未找到 manifest"; exit 1; }
+          MISSING=""
+          for p in luci-app-ssr-plus xray-core; do
+            grep -q "^$p " "$MAN" || MISSING="$MISSING $p"
+          done
+          if echo "${{ matrix.config }}" | grep -qE '^k2p\.config$'; then
+            for p in ngrokc luci-app-ngrokc; do
+              grep -q "^$p " "$MAN" || MISSING="$MISSING $p"
+            done
+          fi
+          if [ -n "$MISSING" ]; then
+            echo "!! 失败：manifest 缺少核心包:$MISSING"
+            echo "   构建虽然绿了，但功能缺失 = 假成功。先翻 defconfig 日志查"
+            echo "   'recursive dependency detected' —— kconfig 丢弃 symbol 时不会有别的声音。"
+            exit 1
+          fi
+          echo "OK：核心功能包齐全（luci-app-ssr-plus / xray-core / ngrokc 均在 manifest，共 $(wc -l < "$MAN") 包）"
+
           # 仅对 16MB SPI NOR 机型做硬校验：镜像必须小于 firmware 分区，
           # 且至少留 1MiB 给 overlay（配置/日志/opkg 都写在 overlay 上）。
           #   分区大小来自设备定义 IMAGE_SIZE：
