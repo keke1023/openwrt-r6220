@@ -198,10 +198,22 @@ jobs:
 
       - name: 加载 ${{ matrix.config }}（源自 ${{ matrix.cfgdir }}）并生成默认配置
         run: |
+          set -o pipefail   # make | tee 后仍能感知 make 的失败退出码
           cd openwrt
           cp ../${{ matrix.cfgdir }}/${{ matrix.config }} .config
           echo 'CONFIG_CCACHE=y' >> .config   # 启用 ccache，配合上面的 ccache 缓存
-          make defconfig
+          # defconfig 的 kconfig 报 recursive dependency 时**退出码通常是 0**，
+          # 但会静默丢弃整个 symbol（2026-11-01 事故：luci-app-ssr-plus 连同 19 个包全丢，
+          # 镜像变小、体积检查反而报 OK）。这里把日志落盘并当场判死，10 分钟内失败。
+          make defconfig 2>&1 | tee /tmp/defconfig.log
+          if grep -q 'recursive dependency detected' /tmp/defconfig.log; then
+            echo "!! 失败：kconfig 检出循环依赖，部分 symbol 已被静默丢弃（构建产物会缺包）"
+            grep -A 6 'recursive dependency detected' /tmp/defconfig.log || true
+            echo "   已知环：ssr-plus -> coreutils <- vssr -> iptables <- ssr-plus"
+            echo "   已实测：删掉 ssr-plus 的 +coreutils 无效（run 41288545484 复现同环），"
+            echo "   正确做法是让 ssr-plus 依赖保持上游原样，见 scripts/diy-part2.sh 第 [20] 段 ①"
+            exit 1
+          fi
 
       - name: 强制剔除默认全家桶/无无线/USB 链（defconfig 之后固化）
         env:
@@ -380,8 +392,9 @@ jobs:
               echo "!! 失败：最终 .config 里没有 CONFIG_PACKAGE_${p}=y"
               echo "   九成是 kconfig 报 recursive dependency 把 symbol 丢了。"
               echo "   排查：搜上面的 'recursive dependency detected' 链条，"
-              echo "   典型是 luci-app-ssr-plus → coreutils ← luci-app-vssr → iptables 环，"
-              echo "   修法见 scripts/diy-part2.sh 第 [20] 段 ①（去掉 +coreutils）。"
+              echo "   典型是 luci-app-ssr-plus → coreutils ← luci-app-vssr → iptables 环。"
+              echo "   已实测：删 ssr-plus 的 +coreutils 反而**制造**了这个环（41283679493 / 41288545484）；"
+              echo "   正解是让 ssr-plus 依赖保持上游原样，见 scripts/diy-part2.sh 第 [20] 段 ①。"
               exit 1
             fi
           done
