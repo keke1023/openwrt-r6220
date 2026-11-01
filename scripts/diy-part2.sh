@@ -931,26 +931,40 @@ fi
 #   其中 libstdcpp 当前不在镜像里（≈700K 安装 / ≈300K squashfs），这才是大头。
 # 空间从下面四处挤，都可逆、都能在日志里逐条核对：
 #
-#   ① ssr-plus 的 +coreutils 删掉（保留 +coreutils-base64）
-#        helloworld 的 LUCI_DEPENDS 同时写了 +coreutils +coreutils-base64；
-#        coreutils 主包是完整 GNU 工具集（≈1.3M 安装），而 ssr-plus 脚本实际只用到
-#        base64（coreutils-base64 单独提供），timeout/stat/head 等 busybox 都有。
-#        → 省 ≈450K squashfs（本次最大一刀）
-#   ② ssr-plus 的 +ip-full 改成 +ip-tiny
-#        tproxy 只用到 `ip rule add fwmark` + `ip route add local ... table`，ip-tiny 全支持；
-#        连带甩掉 ip-full 独有的 libbpf0 + libelf1（≈300K 安装）。
-#        → 省 ≈200K squashfs
+#   ① （已撤销，2026-11-01 实证否决）删 ssr-plus 的 +coreutils
+#        原本以为能省 ≈450K，**实际省不到任何东西**，而且删了也会被拉回：
+#          · feeds/packages/utils/coreutils 的 `Package/coreutils/install` 段是 `true`
+#            —— 主包是**空壳**，一个文件都不装，真正的内容全在 coreutils-<applet> 子包里；
+#          · 每个子包由 `GenPlugin` 生成，`DEPENDS:=coreutils ...`（无 + 号 = 硬依赖），
+#            所以只要 ssr-plus 要 coreutils-base64，coreutils 就必然被 defconfig 选上。
+#        ⇒ 保留 `+coreutils +coreutils-base64` 原样不动。当前镜像里 coreutils 组
+#          （主包空壳 + base64 二进制）合计只有 ≈35K，本来就不是大头。
+#   ② ssr-plus 的 +ip-full 改成 +ip-tiny（已实证安全，不是拍脑袋）
+#        · 功能够用：`package/network/utils/iproute2/patches/170-ip_tiny.patch` 里
+#            { "route",  do_iproute },
+#            { "rule",   do_iprule  },
+#          这两行**不在** `#ifndef IPROUTE2_TINY` 保护范围内，tiny 版原样保留 ——
+#          正好是 tproxy 唯一要用的两条（ip rule add fwmark / ip route add local ... table）。
+#          被裁掉的是 addrlabel / ntable / ntbl / netconf / nexthop / fou / l2tp / tap 等。
+#        · 不会文件冲突：ip-tiny 与 ip-full 都用 ALTERNATIVES
+#            ALTERNATIVES:=200:/sbin/ip:/usr/libexec/ip-tiny
+#            ALTERNATIVES:=300:/sbin/ip:/usr/libexec/ip-full
+#          真身装在 /usr/libexec，/sbin/ip 是 alternatives 符号链接 → 两者共存也不会
+#          触发 check_data_file_clashes；只装 tiny 时 /sbin/ip 直接指向 ip-tiny。
+#        · 收益：ip-full 独占的 libbpf0 + libelf1 一并消失（LIBBPF_FORCE=off）。
+#        → 省 ≈130K squashfs（ip 二进制本身只差 ~110K，libbpf0+libelf1 约 ~80K）
 #   ③ mt7621 target.mk 的 FEATURES 去掉 nand
 #        FEATURES+=nand 会让 include/target.mk 把 ubi-utils 塞进 DEFAULT_PACKAGES，
 #        所以 .config 写 CONFIG_PACKAGE_ubi-utils=n 会被 select 覆盖回 =y（上一版实测确认）。
 #        K2P 是 16MB SPI NOR、没有 UBI 卷，去掉无副作用。
-#        → 省 ≈60K squashfs
+#        → 省 ≈50K squashfs
 #   ④ kmod-mppe 显式关掉（PPPoE 不需要 MPPE，那是 PPTP/VPN 的加密）
-#        → 省 ≈15K squashfs
+#        → 省 ≈12K squashfs
 #
-# ⚠️ 唯一有行为变化的是 ①：若 ssr-plus 某个子功能偷偷用了 coreutils 独有命令，
-#    该功能会报 command not found（不影响主流程、不会变砖）。构建日志的
-#    「配置一致性校验」会 dump 最终 .config，可确认 coreutils 已不在。
+# ⚠️ ②③④ 合起来只有 ≈190K，**不够覆盖 ngrokc 的 ≈400K**（libstdcpp 是大头）。
+#    差额要靠下一轮的另一刀：把 TLS 双栈并成 openssl 单栈
+#    （curl + libustream 都切 openssl，干掉整个 libmbedtls12 ≈250K squashfs）。
+#    那一刀影响面大（涉及 curl/libustream 的 choice），单独一轮验证，不混在这次里。
 # ⚠️ 顺序前提：本段必须在 `make defconfig` 之前跑（diy-part2 正好在 feeds install
 #    之后、defconfig 之前），否则依赖变更不生效。
 # ===========================================================================
@@ -960,7 +974,7 @@ if echo "${TARGET_CONFIG:-}" | grep -qE '^k2p\.config$'; then
   MT7621_TMK="target/linux/ramips/mt7621/target.mk"
 
   if [ -f "$SSRP_MK" ]; then
-    sed -i 's/+coreutils +coreutils-base64/+coreutils-base64/' "$SSRP_MK"
+    # 注意：只动 ip-full，**不动 coreutils**（见上方 ① 的实证说明，删了无效且会被拉回）
     sed -i 's/+ip-full /+ip-tiny /' "$SSRP_MK"
     echo "  已改 $SSRP_MK 依赖，结果："
     grep -nE '\+coreutils|\+ip-tiny|\+ip-full' "$SSRP_MK" | head -4 | sed 's/^/     /'
