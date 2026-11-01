@@ -866,3 +866,60 @@ PYEOF
 else
   echo "==> [18] 非 K2P 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过开源无线替换"
 fi
+
+# ===========================================================================
+# 19) K2P(16M)：firmware 起点 0xa0000 -> 0x50000（弃用原厂 permanent_config）
+# ---------------------------------------------------------------------------
+# 上游 mt7621_phicomm_k2p.dts 的分区表：
+#   0x00000 u-boot(192K) | 0x30000 u-boot-env(64K) | 0x40000 factory(64K)
+#   0x50000 permanent_config(320K, read-only) | 0xa0000 firmware(15744K)
+# 本机已不是原厂固件、不再回原厂，permanent_config 没有用途，把这段并入 firmware：
+#   0x50000 firmware(16064K)，0x50000 + 0xfb0000 = 0x1000000(16MiB)
+# IMAGE_SIZE 必须同步 15744k -> 16064k，且与 DTS 精确一致（写大会 check-size 失败，
+# 镜像静默不产出；写小则白丢空间）。
+#
+# ⚠️ 前提：bootloader 认的 firmware 起始偏移也必须是 0x50000。若 bootloader 固定从
+#    0xa0000 加载，本固件刷入后起不来（用 bootloader 的 web 恢复回滚即可，不会变砖）。
+# ===========================================================================
+if echo "${TARGET_CONFIG:-}" | grep -qE '^k2p\.config$'; then
+  echo "==> [19] K2P(16M)：firmware 起点 0xa0000 -> 0x50000，IMAGE_SIZE -> 16064k"
+  K2P_DTS="target/linux/ramips/dts/mt7621_phicomm_k2p.dts"
+  K2P_MK="target/linux/ramips/image/mt7621.mk"
+  for f in "$K2P_DTS" "$K2P_MK"; do
+    if [ ! -f "$f" ]; then
+      echo "  !! 错误：找不到 $f"
+      exit 1
+    fi
+  done
+
+  cp ../scripts/mt7621_phicomm_k2p_noperm.dts "$K2P_DTS"
+  echo "  已覆盖 $K2P_DTS（删除 permanent_config，firmware reg = <0x50000 0xfb0000>）"
+
+  python3 - "$K2P_MK" <<'PYEOF'
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+m = re.search(r'(define Device/phicomm_k2p\n.*?^endef)', s, re.S | re.M)
+if not m:
+    print("  !! 错误：mt7621.mk 里找不到 define Device/phicomm_k2p 块")
+    sys.exit(1)
+blk = m.group(1)
+if "IMAGE_SIZE := 16064k" in blk:
+    print("  IMAGE_SIZE 已是 16064k，跳过")
+elif "IMAGE_SIZE := 15744k" in blk:
+    s = s.replace(blk, blk.replace("IMAGE_SIZE := 15744k", "IMAGE_SIZE := 16064k"), 1)
+    open(p, "w", encoding="utf-8").write(s)
+    print("  patched %s: IMAGE_SIZE 15744k -> 16064k" % p)
+else:
+    print("  !! 错误：phicomm_k2p 块里的 IMAGE_SIZE 既不是 15744k 也不是 16064k")
+    print(blk)
+    sys.exit(1)
+PYEOF
+
+  echo "  DTS 分区校验："
+  grep -n -B 1 -A 4 'partition@50000' "$K2P_DTS" | sed 's/^/     /'
+  echo "  设备定义校验："
+  grep -n -A 6 'define Device/phicomm_k2p$' "$K2P_MK" | sed 's/^/     /'
+else
+  echo "==> [19] 非 K2P 16M 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 firmware 起点调整"
+fi
