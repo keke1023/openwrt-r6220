@@ -437,6 +437,17 @@ jobs:
           fi
 
           cd openwrt/bin/targets/*/*
+          # ── 包体积体检：只打印、不参与判定，给下一轮精准裁剪提供真实数据 ──
+          #   ipk 是单包压缩包，和 squashfs 里的大小同量级但不相等（压缩算法不同）；
+          #   用它排序找「谁最占地方」已经够用。
+          if ls packages/*.ipk >/dev/null 2>&1; then
+            echo "==> Top 30 大包（ipk 大小，降序）"
+            ls -S packages/*.ipk 2>/dev/null | head -30 | while read -r f; do
+              sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
+              printf "  %7d KiB  %s\n" $((sz/1024)) "$(basename "$f")"
+            done
+            echo "==> 单包合计：$(ls -1 packages/*.ipk 2>/dev/null | wc -l) 个包，$(du -sk packages 2>/dev/null | cut -f1) KiB"
+          fi
           # 仅对 16MB SPI NOR 机型做硬校验：镜像必须小于 firmware 分区，
           # 且至少留 1MiB 给 overlay（配置/日志/opkg 都写在 overlay 上）。
           #   分区大小来自设备定义 IMAGE_SIZE：
