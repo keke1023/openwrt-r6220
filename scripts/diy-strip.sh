@@ -68,6 +68,25 @@ TURBOACC_INCLUDE_SHORTCUT_FE_DRV \
 #      "cannot find dependency libiwinfo-lua for luci" → Error 255（run 111661978562 实测）。
 #      只保留 iwinfo 命令行工具关闭即可（无人依赖它）。
 TARGET_CONFIG="${TARGET_CONFIG:-}"
+
+# ---------------------------------------------------------------------------
+# 16MB 机型共用瘦身（a3004ns / k2p 都适用）
+# ---------------------------------------------------------------------------
+# 只收「有硬证据表明没有任何包依赖它」的项：
+#   kmod-nf-nathelper-extra —— FTP/SIP/IRC/H.323 的 conntrack ALG 助手（≈53KB 安装）。
+#     已核 18.06 索引：没有任何包的 Depends 引用它（firewall 的 DEPENDS 里也没有），
+#     它是 ramips 默认包里的「顺手带上」项。家用路由不需要 ALG，关掉纯赚。
+#   ❗ 注意：ubi-utils **不能**动 —— 它被 base-files 和 fstools 硬依赖
+#     （p186.txt: base-files Depends ... ubi-utils；fstools Depends ... ubi-utils），
+#     强制 =n 会被 kconfig 拉回 =y，直接触发校验0 失败。想省这 70KB 得改 fstools/base-files
+#     的 Makefile，风险远大于收益。
+if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns|k2p'; then
+  echo "==> 16MB 机型（$TARGET_CONFIG）：追加共用瘦身项（conntrack ALG 助手）"
+  FORCE_OFF="$FORCE_OFF \
+kmod-nf-nathelper-extra \
+"
+fi
+
 if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns'; then
   echo "==> 检测到 16MB 纯有线机型（$TARGET_CONFIG），追加剔除整个无线子系统"
   FORCE_OFF="$FORCE_OFF \
@@ -165,6 +184,44 @@ fi
 # ---------------------------------------------------------------------------
 FORCE_ON="libiwinfo libiwinfo-lua libiwinfo-data"
 
+# ---------------------------------------------------------------------------
+# K2P：无线走开源 mt76 —— 与 a3004ns 恰好相反，这里是「必须保留」
+# ---------------------------------------------------------------------------
+# 为什么要在这里兜底 =y：
+#   1) K2P 的 DEVICE_PACKAGES 已被 diy-part2.sh 第 [18] 段改成
+#        kmod-mt7615e kmod-mt7615-firmware -wpad-openssl
+#      但 DEVICE_PACKAGES 只是「默认 y」的身份，config 里一旦写错成 =n 就会被压掉，
+#      而少了 mt7615e 的固件是「能开机、没有 wifi」的静默失败，最难排查。
+#   2) wpad 我们显式选 wpad-basic（比 wpad-openssl 省约 100KB），
+#      但 mt7621 的 target.mk DEFAULT_PACKAGES 里带的是 wpad-openssl，
+#      两者 PROVIDES 同一个 wpad，必须确保只有 wpad-basic 是 y。
+#   3) 闭源 kmod-mt7615d / luci-app-mtwifi 必须 =n：它们和开源 mt7615e 抢同一个
+#      PCI 设备（一张卡不能同时绑两个驱动），且体积多 ~0.85MB。
+if echo "$TARGET_CONFIG" | grep -qiE 'k2p'; then
+  echo "==> K2P：开源无线栈强制 =y，闭源 mt_wifi 强制 =n"
+  FORCE_ON="$FORCE_ON \
+kmod-mt7615e \
+kmod-mt7615-firmware \
+kmod-mac80211 \
+kmod-cfg80211 \
+wpad-basic \
+wireless-regdb \
+hostapd-common \
+"
+  FORCE_OFF="$FORCE_OFF \
+kmod-mt7615d \
+luci-app-mtwifi \
+kmod-mt7603e \
+kmod-mt7612e \
+wpad-openssl \
+wpad-wolfssl \
+wpad \
+wpad-mini \
+wpad-basic-openssl \
+wpad-basic-wolfssl \
+"
+fi
+
 # 把最终剔除清单导出，供 CI 的「配置一致性校验」逐步核对
 #（该步骤据此判断：被我们强制 =n 的符号，是否被 kconfig 求解又翻回 y/m）
 FORCE_OFF_LIST="${FORCE_OFF_LIST:-/tmp/force-off.list}"
@@ -203,7 +260,7 @@ done
 #   kmod-ipt-offload → xt_FLOWOFFLOAD（含 --hw）
 #   kmod-nf-flow     → 置位 CONFIG_NF_FLOW_TABLE + CONFIG_NF_FLOW_TABLE_HW，
 #                      硬件卸载路径缺此符号会退化，故两者必须同时为 y
-if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns'; then
+if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns|k2p'; then
   for p in kmod-ipt-offload kmod-nf-flow; do
     sed -i "s/^CONFIG_PACKAGE_${p}=.*/CONFIG_PACKAGE_${p}=y/" .config
     grep -q "^CONFIG_PACKAGE_${p}=" .config || echo "CONFIG_PACKAGE_${p}=y" >> .config
@@ -256,4 +313,48 @@ if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns'; then
   else
     echo "（内核尚未 configure，编译结束后可复审 build_dir 里的 .config：应无 CONFIG_USB=y/m）"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# K2P 专项复核：开源无线栈必须在、闭源 mt_wifi 必须不在
+# ---------------------------------------------------------------------------
+# 这里只「警告不失败」：真正致命的一致性问题（被 select 拉回）由 CI 的
+# 「配置一致性校验」负责 exit 1；本段的价值是把「能开机但没 wifi」这种
+# 静默失败在编译前就喊出来。
+if echo "$TARGET_CONFIG" | grep -qiE 'k2p'; then
+  echo "--- [K2P] 开源无线栈复核（必须 =y）---"
+  # 只查「菜单里可选」的包；kmod-mt76-core / mt76-connac / mt7615-common 是 HIDDEN:=1，
+  # 由 +kmod-xxx 依赖自动 select，.config 里硬写 =y 不生效，也不该当失败条件。
+  MISSING=""
+  for p in kmod-mt7615e kmod-mt7615-firmware kmod-mac80211 kmod-cfg80211 wpad-basic; do
+    grep -qE "^CONFIG_PACKAGE_${p}=y$" .config || MISSING="$MISSING $p"
+  done
+  if [ -n "$MISSING" ]; then
+    echo "!! 警告：以下无线包未置 y，固件会「能开机、没有 wifi」："
+    for p in $MISSING; do echo "   $p"; done
+    echo "   排查：config 里是否误写 =n；DEVICE_PACKAGES 是否被 diy-part2 第 [18] 段改掉"
+  else
+    echo "OK：kmod-mt7615e 全家 + wpad-basic 齐备"
+  fi
+
+  echo "--- [K2P] 闭源 mt_wifi 复核（必须未选中；与开源驱动抢同一张卡）---"
+  BADC=$(grep -E '^CONFIG_PACKAGE_(kmod-mt7615d|luci-app-mtwifi)=[ym]$' .config || true)
+  if [ -n "$BADC" ]; then
+    echo "$BADC"
+    echo "!! 警告：闭源驱动仍在，会与 mt7615e 抢 PCI 设备并多占 ~0.85MB"
+  else
+    echo "OK：闭源 kmod-mt7615d / luci-app-mtwifi 均未选中"
+  fi
+
+  echo "--- [K2P] ssr-plus 客户端选型复核（必须 NONE，libev 已关）---"
+  grep -E '^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_(NONE|Libev)_Client=' .config \
+    || echo "（未出现在 .config，说明 choice 用了默认值 —— mipsel 上默认是 Libev，需显式写 NONE）"
+
+  echo "--- [K2P] PPPoE 复核（当主路由拨号用）---"
+  grep -E '^CONFIG_PACKAGE_(ppp|ppp-mod-pppoe)=' .config || echo "（未选中：本机将无法 PPPoE 拨号，只适合做 AP/旁路由）"
+
+  echo "--- [K2P] 瘦身项复核 ---"
+  grep -E '^CONFIG_PACKAGE_(kmod-nf-nathelper-extra|ubi-utils)=' .config || true
+  grep -E '^CONFIG_PACKAGE_(shadowsocks-libev-ss-redir|shadowsocks-libev-ss-local|dns2socks|dns2tcp|microsocks)=' .config \
+    || echo "OK：ssr-plus 未用协议二进制均未选中"
 fi

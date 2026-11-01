@@ -75,7 +75,10 @@ echo "==> helloworld 已就绪，luci-app-ssr-plus 来自：package/helloworld/l
 #    把下面 PIN_COMMIT 改成空串（走 master 最新）；但注意本机型已在 config 里
 #    关闭整条 USB 链（无 extroot 退路），走 master 最新 xray 会撑爆 16MB 分区，
 #    届时必须同时把 USB 那几个包回开才有可行解。
-SMALL_FLASH_PATTERNS="*a3004ns*"
+# 16MB SPI NOR 机型清单（模糊匹配 config 基名）：
+#   a3004ns-dual  —— 纯有线（无线全关）
+#   k2p           —— 带开源 mt76 无线（mt7615e），比 a3004ns 更吃紧，同样必须 pin
+SMALL_FLASH_PATTERNS="*a3004ns* *k2p*"
 PIN_COMMIT="a201839"
 
 if [ -n "$SMALL_FLASH_PATTERNS" ] && [ -n "$PIN_COMMIT" ]; then
@@ -117,6 +120,59 @@ if [ -f "$SSRP_MK" ]; then
 else
   echo "!! 未找到 $SSRP_MK，跳过 Rust 剥离（请确认 helloworld 源已就位）"
 fi
+
+# ---------------------------------------------------------------------------
+# 16MB 机型：剥离 ssr-plus 里「无条件安装但本机用不到」的协议二进制
+# ---------------------------------------------------------------------------
+# 187-2 的 LUCI_DEPENDS 有一长串**无条件** + 依赖，与是否启用对应协议无关：
+#     +dns2socks +dns2tcp +microsocks +shadowsocksr-libev-ssr-check
+# 它们只服务于：DNS2SOCKS / DNS2TCP 端口转发、局域网 Socks5 共享（microsocks）、
+# SSR 节点连通性检测（ssr-check）。本机型只跑 xray（vless/reality），装了也不会执行。
+# 做法：只删这几个依赖词，不碰其余依赖（DEPENDS 是多行 \ 续行，整行删除会破坏语法）。
+# 注：想保留某项时把对应的 s/+xxx//g 删掉即可。
+#
+# ⚠️ 另一半瘦身不在这里做，而是靠 config 里的 INCLUDE_Shadowsocks_NONE_Client=y ——
+#    ss-local/ss-redir 是**条件依赖**（+PACKAGE_..._INCLUDE_Shadowsocks_Libev_Client:xxx），
+#    但那个 choice 在 mipsel 上的默认选项就是 Libev（不是 None），只在 config 里写
+#    Libev=n 根本压不住，必须显式选 NONE。两者合计约 250KB 安装体积。
+if [ -n "${PINNED:-}" ] && [ -f "$SSRP_MK" ]; then
+  echo "==> 16MB 机型（$TARGET_CONFIG）：剥离 ssr-plus 未使用的协议依赖（dns2socks/dns2tcp/microsocks/ssr-check）"
+  sed -i -E 's/\+dns2socks\b//g; s/\+dns2tcp\b//g; s/\+microsocks\b//g; s/\+shadowsocksr-libev-ssr-check\b//g' "$SSRP_MK"
+  if grep -qE '\+(dns2socks|dns2tcp|microsocks|shadowsocksr-libev-ssr-check)' "$SSRP_MK"; then
+    echo "!! 错误：协议依赖剥离失败，请人工检查 $SSRP_MK 的 LUCI_DEPENDS"
+    exit 1
+  fi
+  echo "==> 已剥离；当前 ssr-plus 依赖行："
+  sed -n '/^LUCI_DEPENDS:=/,/^$/p' "$SSRP_MK" | sed 's/^/    /'
+fi
+
+# ---------------------------------------------------------------------------
+# K2P：无线走开源 mt76 —— 先确认本分支自带该包（不满足就别继续，白烧一小时编译）
+# ---------------------------------------------------------------------------
+# 事实依据（已核对 immortalwrt openwrt-18.06-k5.4）：
+#   package/kernel/mt76/Makefile  PKG_SOURCE_DATE:=2021-10-23.1
+#   其 Makefile 内定义了 KernelPackage/mt76-core、mt76-connac、mt7615-common、
+#   mt7615e、mt7615-firmware；patches 只有一个 001-allow-vht-on-2g.patch（正是给
+#   MT7615 的 2.4G VHT 用的）。因此**不需要从 21.02 搬源码**，只需改 DEVICE_PACKAGES
+#   与 config（见 diy-part2.sh 第 [18] 段）。
+case "$TARGET_CONFIG" in
+  *k2p*)
+    echo "==> K2P：校验本分支自带的开源 mt76 包"
+    MT76_MK="package/kernel/mt76/Makefile"
+    if [ ! -f "$MT76_MK" ]; then
+      echo "!! 错误：$MT76_MK 不存在 —— 本分支没有 mt76，需要另行搬运（原计划从 21.02 取）"
+      exit 1
+    fi
+    for sym in mt7615e mt7615-common mt7615-firmware mt76-core mt76-connac; do
+      if ! grep -q "KernelPackage/$sym\$" "$MT76_MK"; then
+        echo "!! 错误：$MT76_MK 里没有 KernelPackage/$sym，开源无线方案不成立"
+        exit 1
+      fi
+    done
+    echo "    OK：kmod-mt7615e / mt7615-common / mt7615-firmware / mt76-core / mt76-connac 齐备"
+    echo "    mt76 版本：$(grep -m1 '^PKG_SOURCE_DATE:=' "$MT76_MK" | cut -d= -f2)"
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 小闪存机型：把 xray-core 单独前移到 1.8 系最终版 v1.8.24（2024-08-30）

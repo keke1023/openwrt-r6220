@@ -751,7 +751,7 @@ fi
 #     b) 直接补丁 firewall 包的默认 firewall.config —— 首次刷入即带好选项，
 #        不依赖 uci-defaults 的执行时机
 # ---------------------------------------------------------------------------
-if echo "${TARGET_CONFIG:-}" | grep -qiE 'a3004ns'; then
+if echo "${TARGET_CONFIG:-}" | grep -qiE 'a3004ns|k2p'; then
   echo "==> [17] 注入硬件 offload（$TARGET_CONFIG）：fw3 flow_offloading_hw=1"
 
   FW_CONF="package/network/config/firewall/files/firewall.config"
@@ -807,5 +807,62 @@ UCIEOF
   chmod +x files/etc/uci-defaults/99-a3004ns-hw-offload
   echo "  已注入 /etc/uci-defaults/99-a3004ns-hw-offload（首次启动写入 uci 并 commit）"
 else
-  echo "==> [17] 非 a3004ns 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过硬件 offload 注入"
+  echo "==> [17] 非 16MB 有线/开源自带无线机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过硬件 offload 注入"
+fi
+
+# ---------------------------------------------------------------------------
+# [18] K2P：把 DEVICE_PACKAGES 从 MTK 闭源 mt_wifi 换成开源 mt76（mt7615e）
+# ---------------------------------------------------------------------------
+# 背景：本分支 mt7621.mk 里 K2P 的定义是
+#     define Device/phicomm_k2p
+#       IMAGE_SIZE := 15744k
+#       DEVICE_PACKAGES := kmod-mt7615d luci-app-mtwifi -wpad-openssl
+#     endef
+# kmod-mt7615d 是 MTK 闭源 mt_wifi.ko（wireless-extensions 私有 ioctl）：
+#   - 体积：mt_wifi.ko 源码 271 个 .c/12.6MB，编出来约 3.5MB，进 squashfs ≈1.05MB，
+#     再加内嵌 firmware 0.58MB，比开源方案多 ~0.85MB；
+#   - 配网：不进 cfg80211，LuCI 原生「无线」页是空的，只能用 luci-app-mtwifi 私有页；
+#   - 维护：升内核/换分支即失效。
+# 开源方案：DTS 里本来就写好了 mt76 节点（mt7621_phicomm_k2p.dts:97-101）
+#     &pcie0 { mt76@0,0 { compatible="mediatek,mt76";
+#                          mediatek,mtd-eeprom = <&factory 0x0>; }; };
+#   与 21.02 官方 K2P 支持逐字节相同，DEVICE_PACKAGES 也就是
+#     kmod-mt7615e kmod-mt7615-firmware
+# 保留 -wpad-openssl：K2P 家里只需要 WPA2-PSK，由 config 里显式选 wpad-basic（更省）。
+#
+# ⚠️ 为什么改 mt7621.mk 而不是在 config 里压 =n：
+#   DEVICE_PACKAGES 会被 include/target.mk 并入 DEFAULT_PACKAGES，最终以
+#   「默认 y」的身份参与 kconfig 求解；config 里的 =n 在 defconfig 阶段会被翻回，
+#   只有改掉源头（这一行）才彻底。
+# ---------------------------------------------------------------------------
+if echo "${TARGET_CONFIG:-}" | grep -qiE 'k2p'; then
+  echo "==> [18] K2P：DEVICE_PACKAGES 换成开源 mt76（kmod-mt7615e + firmware）"
+  MK="target/linux/ramips/image/mt7621.mk"
+  if [ ! -f "$MK" ]; then
+    echo "  !! 错误：找不到 $MK"
+    exit 1
+  fi
+  # 只改 K2P 那一块里的那一行（该行的旧值在全文件里唯一，故直接全局替换是安全的）
+  if grep -q "DEVICE_PACKAGES := kmod-mt7615d luci-app-mtwifi -wpad-openssl" "$MK"; then
+    python3 - "$MK" <<'PYEOF'
+import sys, re
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+old = "DEVICE_PACKAGES := kmod-mt7615d luci-app-mtwifi -wpad-openssl"
+new = "DEVICE_PACKAGES := kmod-mt7615e kmod-mt7615-firmware -wpad-openssl"
+n = s.count(old)
+s = s.replace(old, new)
+open(p, "w", encoding="utf-8").write(s)
+print("  patched %s: %d 处 DEVICE_PACKAGES 改为开源 mt76" % (p, n))
+PYEOF
+  elif grep -q "DEVICE_PACKAGES := kmod-mt7615e kmod-mt7615-firmware" "$MK"; then
+    echo "  mt7621.mk 已是开源 mt76 写法，跳过"
+  else
+    echo "  !! 警告：K2P 的 DEVICE_PACKAGES 既不是闭源也不含开源写法，请人工核对："
+    grep -n -A 6 "define Device/phicomm_k2p" "$MK" | sed 's/^/     /'
+  fi
+  echo "  当前 K2P 定义："
+  grep -n -A 6 "define Device/phicomm_k2p" "$MK" | sed 's/^/     /'
+else
+  echo "==> [18] 非 K2P 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过开源无线替换"
 fi
