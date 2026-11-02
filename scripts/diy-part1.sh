@@ -122,7 +122,11 @@ fi
 #                           domainsocket/wireguard/loopback/reverse/metrics/
 #                           observatory(+command)/toml/yaml）
 #   002-drop-grpc-api.patch 删 all.go 里 4 个 gRPC API 模块 + 摘掉 CLI 的
-#                           api 子命令，真正切断 google.golang.org/grpc
+#                           api 子命令
+#   003-drop-tls-grpc.patch 掏空 transport/internet/tls/grpc.go
+#                           ★ 关键：tls 包为 reality 必须保留，但它自己 import grpc
+#                           （NewGrpcUtls），只跑 001+002 时 grpc 仍会被链接，
+#                           实测只省 37 KB。掏空该文件后 grpc 才真正退出编译。
 #
 # 为什么不覆盖 Build/Prepare：v1/v2 两轮 CI 产出的 xray 二进制 md5 完全相同
 # （23,713,500 B），grpc / commander / quic-go 全在，证明那个 hook 压根没被执行。

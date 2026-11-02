@@ -26,7 +26,7 @@ v3 改走官方机制：把改动做成 unified diff 放进包的 `patches/` 目
 
 002-drop-grpc-api.patch
     删 all.go 里 4 个 gRPC API 模块 + 改 main/commands/all/commands.go，
-    去掉 `api` 的 import 与 `api.CmdAPI`，真正切断 google.golang.org/grpc。
+    去掉 `api` 的 import 与 `api.CmdAPI`，切断 CLI 侧的 grpc 引用链。
     原因：app/commander、app/log/command、app/proxyman/command、app/stats/command
     全都 import grpc，而 main/commands/all 又 import main/commands/all/api，
     api 再把这四个包拉一遍 —— 只删 transport/internet/grpc（传输层）等于白删。
@@ -34,6 +34,17 @@ v3 改走官方机制：把改动做成 unified diff 放进包的 `patches/` 目
     安全性已核实：luci-app-ssr-plus 187-2 的 gen_config.lua 生成的 Xray 配置里
     `api` / `stats` / `policy` 出现 0 次，只有 log / inbounds / outbounds / routing；
     init.d 与 control.lua 也没有 `xray api` 调用 → 删掉后 ssr-plus 照常启动。
+
+003-drop-tls-grpc.patch
+    把 transport/internet/tls/grpc.go 掏空成一行 `package tls`。
+    ★ 这是 v3 首轮只省 37 KB 的元凶：只跑 001+002 时 xray 二进制里
+    google.golang.org/grpc 仍在，因为 **tls 传输包自己 import grpc** ——
+    文件 tls/grpc.go 提供 NewGrpcUtls（gRPC 的 uTLS 凭据），
+    而 tls 包为 reality 必须保留，于是 grpc 顺着它整条链被链接进来。
+    该文件导出的 NewGrpcUtls / grpcUtls / grpcUtlsInfo 全仓只在它自己内部使用
+    （GitHub 代码搜索确认 total_count=1，唯一调用方是已删除的
+    transport/internet/grpc），掏空后 tls 包其余文件不受影响。
+    utls 本身仍被 reality / vless / ech 使用，保留不动。
 
 【保留】
 vless(in/out) + reality + tls + tcp + udp + websocket + http + vmess + shadowsocks +
@@ -54,6 +65,7 @@ import sys
 PATCH_NAMES = [
     "001-slim-modules.patch",
     "002-drop-grpc-api.patch",
+    "003-drop-tls-grpc.patch",
 ]
 
 # v1/v2 注入块的起始标记（需清理掉，否则 Build/Prepare 覆盖会干扰判断）
@@ -157,9 +169,10 @@ def main():
 
     strip_legacy_block(os.path.join(pkg_dir, "Makefile"))
 
-    print("==> xray 精简 v3 就绪：补丁位于 %s" % dst_dir)
+    print("==> xray 精简 v3 就绪：补丁位于 %s（%d 个）" % (dst_dir, len(PATCH_NAMES)))
     print("    Prepare 阶段由 Build/Patch 自动应用（PATCH_DIR=./patches），无需改 Makefile")
     print("    预期：all.go 注册行 54 -> 38，google.golang.org/grpc 退出编译")
+    print("    注意 003 是关键：tls/grpc.go 会把 grpc 重新拖回来，只跑 001+002 只能省几十 KB")
     return 0
 
 
