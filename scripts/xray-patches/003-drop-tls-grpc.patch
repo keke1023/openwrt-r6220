@@ -1,3 +1,200 @@
+diff --git a/infra/conf/api.go b/infra/conf/api.go
+index 879fc32..8f52a95 100644
+--- a/infra/conf/api.go
++++ b/infra/conf/api.go
+@@ -1,44 +1 @@
+ package conf
+-
+-import (
+-	"strings"
+-
+-	"github.com/xtls/xray-core/app/commander"
+-	loggerservice "github.com/xtls/xray-core/app/log/command"
+-	observatoryservice "github.com/xtls/xray-core/app/observatory/command"
+-	handlerservice "github.com/xtls/xray-core/app/proxyman/command"
+-	statsservice "github.com/xtls/xray-core/app/stats/command"
+-	"github.com/xtls/xray-core/common/serial"
+-)
+-
+-type APIConfig struct {
+-	Tag      string   `json:"tag"`
+-	Services []string `json:"services"`
+-}
+-
+-func (c *APIConfig) Build() (*commander.Config, error) {
+-	if c.Tag == "" {
+-		return nil, newError("API tag can't be empty.")
+-	}
+-
+-	services := make([]*serial.TypedMessage, 0, 16)
+-	for _, s := range c.Services {
+-		switch strings.ToLower(s) {
+-		case "reflectionservice":
+-			services = append(services, serial.ToTypedMessage(&commander.ReflectionConfig{}))
+-		case "handlerservice":
+-			services = append(services, serial.ToTypedMessage(&handlerservice.Config{}))
+-		case "loggerservice":
+-			services = append(services, serial.ToTypedMessage(&loggerservice.Config{}))
+-		case "statsservice":
+-			services = append(services, serial.ToTypedMessage(&statsservice.Config{}))
+-		case "observatoryservice":
+-			services = append(services, serial.ToTypedMessage(&observatoryservice.Config{}))
+-		}
+-	}
+-
+-	return &commander.Config{
+-		Tag:     c.Tag,
+-		Service: services,
+-	}, nil
+-}
+diff --git a/infra/conf/grpc.go b/infra/conf/grpc.go
+index 1844751..8f52a95 100644
+--- a/infra/conf/grpc.go
++++ b/infra/conf/grpc.go
+@@ -1,39 +1 @@
+ package conf
+-
+-import (
+-	"github.com/xtls/xray-core/transport/internet/grpc"
+-	"google.golang.org/protobuf/proto"
+-)
+-
+-type GRPCConfig struct {
+-	ServiceName         string `json:"serviceName" `
+-	MultiMode           bool   `json:"multiMode"`
+-	IdleTimeout         int32  `json:"idle_timeout"`
+-	HealthCheckTimeout  int32  `json:"health_check_timeout"`
+-	PermitWithoutStream bool   `json:"permit_without_stream"`
+-	InitialWindowsSize  int32  `json:"initial_windows_size"`
+-	UserAgent           string `json:"user_agent"`
+-}
+-
+-func (g *GRPCConfig) Build() (proto.Message, error) {
+-	if g.IdleTimeout <= 0 {
+-		g.IdleTimeout = 0
+-	}
+-	if g.HealthCheckTimeout <= 0 {
+-		g.HealthCheckTimeout = 0
+-	}
+-	if g.InitialWindowsSize < 0 {
+-		// default window size of gRPC-go
+-		g.InitialWindowsSize = 0
+-	}
+-
+-	return &grpc.Config{
+-		ServiceName:         g.ServiceName,
+-		MultiMode:           g.MultiMode,
+-		IdleTimeout:         g.IdleTimeout,
+-		HealthCheckTimeout:  g.HealthCheckTimeout,
+-		PermitWithoutStream: g.PermitWithoutStream,
+-		InitialWindowsSize:  g.InitialWindowsSize,
+-		UserAgent:           g.UserAgent,
+-	}, nil
+-}
+diff --git a/infra/conf/transport.go b/infra/conf/transport.go
+index fa8a388..1108167 100644
+--- a/infra/conf/transport.go
++++ b/infra/conf/transport.go
+@@ -13,8 +13,6 @@ type TransportConfig struct {
+ 	HTTPConfig *HTTPConfig         `json:"httpSettings"`
+ 	DSConfig   *DomainSocketConfig `json:"dsSettings"`
+ 	QUICConfig *QUICConfig         `json:"quicSettings"`
+-	GRPCConfig *GRPCConfig         `json:"grpcSettings"`
+-	GUNConfig  *GRPCConfig         `json:"gunSettings"`
+ }
+ 
+ // Build implements Buildable.
+@@ -87,19 +85,5 @@ func (c *TransportConfig) Build() (*global.Config, error) {
+ 		})
+ 	}
+ 
+-	if c.GRPCConfig == nil {
+-		c.GRPCConfig = c.GUNConfig
+-	}
+-	if c.GRPCConfig != nil {
+-		gs, err := c.GRPCConfig.Build()
+-		if err != nil {
+-			return nil, newError("Failed to build gRPC config.").Base(err)
+-		}
+-		config.TransportSettings = append(config.TransportSettings, &internet.TransportConfig{
+-			ProtocolName: "grpc",
+-			Settings:     serial.ToTypedMessage(gs),
+-		})
+-	}
+-
+ 	return config, nil
+ }
+diff --git a/infra/conf/transport_internet.go b/infra/conf/transport_internet.go
+index 55cc8c2..e7cc264 100644
+--- a/infra/conf/transport_internet.go
++++ b/infra/conf/transport_internet.go
+@@ -692,8 +692,6 @@ type StreamConfig struct {
+ 	DSSettings      *DomainSocketConfig `json:"dsSettings"`
+ 	QUICSettings    *QUICConfig         `json:"quicSettings"`
+ 	SocketSettings  *SocketConfig       `json:"sockopt"`
+-	GRPCConfig      *GRPCConfig         `json:"grpcSettings"`
+-	GUNConfig       *GRPCConfig         `json:"gunSettings"`
+ }
+ 
+ // Build implements Buildable.
+@@ -801,19 +799,6 @@ func (c *StreamConfig) Build() (*internet.StreamConfig, error) {
+ 			Settings:     serial.ToTypedMessage(qs),
+ 		})
+ 	}
+-	if c.GRPCConfig == nil {
+-		c.GRPCConfig = c.GUNConfig
+-	}
+-	if c.GRPCConfig != nil {
+-		gs, err := c.GRPCConfig.Build()
+-		if err != nil {
+-			return nil, newError("Failed to build gRPC config.").Base(err)
+-		}
+-		config.TransportSettings = append(config.TransportSettings, &internet.TransportConfig{
+-			ProtocolName: "grpc",
+-			Settings:     serial.ToTypedMessage(gs),
+-		})
+-	}
+ 	if c.SocketSettings != nil {
+ 		ss, err := c.SocketSettings.Build()
+ 		if err != nil {
+diff --git a/infra/conf/xray.go b/infra/conf/xray.go
+index 7bfc53e..169a736 100644
+--- a/infra/conf/xray.go
++++ b/infra/conf/xray.go
+@@ -402,7 +402,6 @@ type Config struct {
+ 	OutboundConfigs []OutboundDetourConfig `json:"outbounds"`
+ 	Transport       *TransportConfig       `json:"transport"`
+ 	Policy          *PolicyConfig          `json:"policy"`
+-	API             *APIConfig             `json:"api"`
+ 	Metrics         *MetricsConfig         `json:"metrics"`
+ 	Stats           *StatsConfig           `json:"stats"`
+ 	Reverse         *ReverseConfig         `json:"reverse"`
+@@ -451,9 +450,6 @@ func (c *Config) Override(o *Config, fn string) {
+ 	if o.Policy != nil {
+ 		c.Policy = o.Policy
+ 	}
+-	if o.API != nil {
+-		c.API = o.API
+-	}
+ 	if o.Metrics != nil {
+ 		c.Metrics = o.Metrics
+ 	}
+@@ -555,13 +551,6 @@ func (c *Config) Build() (*core.Config, error) {
+ 		},
+ 	}
+ 
+-	if c.API != nil {
+-		apiConf, err := c.API.Build()
+-		if err != nil {
+-			return nil, err
+-		}
+-		config.App = append(config.App, serial.ToTypedMessage(apiConf))
+-	}
+ 	if c.Metrics != nil {
+ 		metricsConf, err := c.Metrics.Build()
+ 		if err != nil {
+diff --git a/transport/internet/tls/grpc.go b/transport/internet/tls/grpc.go
+index a698196..bf8418c 100644
 --- a/transport/internet/tls/grpc.go
 +++ b/transport/internet/tls/grpc.go
 @@ -1,108 +1 @@
