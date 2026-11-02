@@ -78,9 +78,12 @@ echo "==> helloworld 已就绪，luci-app-ssr-plus 来自：package/helloworld/l
 # 16MB SPI NOR 机型清单（**精确匹配 config 基名**，不用通配）：
 #   a3004ns-dual.config —— 纯有线（无线全关）
 #   k2p.config          —— 带开源 mt76 无线（mt7615e），比 a3004ns 更吃紧，同样必须 pin
+#   ezviz_cs-w3-wd1200g.config —— 萤石 W3 原厂 16MB（ipq40xx / IPQ4018 + 128MB RAM）。
+#       注意与 23.05 的 ezviz_cs-w3-wd1200g-32m.config（已换 32MB 芯片）区分：
+#       这里只 pin 原厂 16MB 那个，32m 版仍走 master 最新。
 # ⚠️ 这里必须写精确名：早期写成 *k2p*，会把 23.05 的 phicomm_k2p-32m.config（32MB，
 #    本来该走 master 最新 xray）一起 pin 到 a201839 + 旧 xray，属于误伤。
-SMALL_FLASH_PATTERNS="a3004ns-dual.config k2p.config"
+SMALL_FLASH_PATTERNS="a3004ns-dual.config k2p.config ezviz_cs-w3-wd1200g.config"
 PIN_COMMIT="a201839"
 
 if [ -n "$SMALL_FLASH_PATTERNS" ] && [ -n "$PIN_COMMIT" ]; then
@@ -106,6 +109,32 @@ if [ -z "${PINNED:-}" ]; then
     openwrt-18.06-k*) echo "==> 18.06-k5.4：用 helloworld master 最新提交（xray v26.x 需 Go 1.26）" ;;
     *)                echo "==> 23.05/master：用 helloworld master 分支最新提交（ssr-plus 190-3；Rust 已在下方剥离）" ;;
   esac
+fi
+
+# ---------------------------------------------------------------------------
+# xray 二进制精简（本轮只对萤石 W3 原厂 16MB 试跑）
+# ---------------------------------------------------------------------------
+# 给 xray-core 注入 Build/Prepare 覆盖，在源码解压后删掉 main/distro/all/all.go
+# 里 12 个可选模块的空导入：
+#   quic / grpc / kcp / domainsocket / wireguard / loopback / reverse /
+#   metrics / observatory(+command) / toml / yaml
+# 对应第三方依赖（quic-go、google.golang.org/grpc、protobuf）完全不参与编译，
+# 是 16MB flash 上最肥的一块。保留 vless(in/outbound) + reality + tls + tcp +
+# websocket + http + vmess + shadowsocks + trojan + socks + dokodemo + freedom，
+# vless+reality 完整可用；SS/SSR 走 shadowsocks-libev 独立二进制，不受影响。
+# 实测：all.go 注册行 54 -> 42，19 项关键能力逐条核对无缺失。
+#
+# 门控说明：这里刻意**不**跟 PINNED 走 —— PINNED 还包含 k2p / a3004ns-dual，
+# 一起改等于一次动三台，出问题不好定位。先只让萤石 W3 试跑，验证通过后
+# 把下面的条件换成 [ -n "${PINNED:-}" ]，即可推广到全部小闪存机型。
+if echo "${TARGET_CONFIG:-}" | grep -qE '^ezviz_cs-w3-wd1200g\.config$'; then
+  XRAY_SLIM_PY="../scripts/patch-xray-slim.py"
+  XRAY_SLIM_MK="package/helloworld/xray-core/Makefile"
+  if [ -f "$XRAY_SLIM_PY" ] && [ -f "$XRAY_SLIM_MK" ]; then
+    python3 "$XRAY_SLIM_PY" "$XRAY_SLIM_MK" || { echo "!! 错误：xray 精简注入失败"; exit 1; }
+  else
+    echo "!! 警告：缺少 $XRAY_SLIM_PY 或 $XRAY_SLIM_MK，跳过 xray 精简（固件可能超分区）"
+  fi
 fi
 
 echo "==> 剥离 shadowsocks-rust（Rust 工具链在 aarch64/filogic 上编译极慢；ssr-plus 用 shadowsocks-libev 版即可，去掉 Rust 不影响 SSR/V2Ray/Xray 单出口，且 kst-wf3000a 等机型不再被拖慢）"
@@ -186,7 +215,15 @@ esac
 XRAY_MK="package/helloworld/xray-core/Makefile"
 XRAY_PIN_VER="1.8.24"
 XRAY_PIN_HASH="86e3e388c77cda4d8457a607356416c201c1f18bbed53f0a9e76a228508ff298"
-if [ -n "${PINNED:-}" ] && [ -f "$XRAY_MK" ]; then
+# ezviz（萤石 W3 原厂 16MB）例外：保持 pin 下来的 v1.8.4，不前移到 1.8.24。
+#   理由：这台 firmware 分区只有 14.5MiB（比 K2P 的 15.75MiB 还小 1.25MiB），
+#   1.8.24 比 1.8.4 大 0.8MiB，前移会把 overlay 压到 1MB 以下，ssr-plus 连节点
+#   配置都存不稳。1.8.4 的 reality 链路已逐文件核实完整（client-config.lua /
+#   ssrurl.htm / subscribe.lua / gen_config.lua 四处均有 realitySettings），不缺功能。
+#   若将来确实需要 1.8.24 的 REALITY/Vision 修复，删掉下面这个分支即可。
+if echo "${TARGET_CONFIG:-}" | grep -qE '^ezviz_cs-w3-wd1200g\.config$' && [ -f "$XRAY_MK" ]; then
+  echo "==> xray-core 保持 v$(grep -m1 '^PKG_VERSION:=' "$XRAY_MK" | cut -d'=' -f2)（ezviz 16MB 机型刻意不前移到 1.8.24，省约 0.8MiB）"
+elif [ -n "${PINNED:-}" ] && [ -f "$XRAY_MK" ]; then
   XRAY_CUR=$(grep -m1 '^PKG_VERSION:=' "$XRAY_MK" | cut -d'=' -f2)
   if [ "$XRAY_CUR" = "$XRAY_PIN_VER" ]; then
     echo "==> xray-core 已是 v$XRAY_PIN_VER，跳过版本前移"

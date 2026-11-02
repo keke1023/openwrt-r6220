@@ -607,7 +607,13 @@ fi
 #        本段无需再改（config 里显式固化一次，防 defconfig 翻回 regular buffer）。
 IPQ40XX_DTS=$(ls target/linux/ipq40xx/files*/arch/arm/boot/dts/qcom-ipq4018-cs-w3-wd1200g-eup.dts 2>/dev/null | head -1)
 IPQ40XX_GMK="target/linux/ipq40xx/image/generic.mk"
-if [ -n "$IPQ40XX_DTS" ] && [ -f "$IPQ40XX_GMK" ]; then
+# ⚠️ 只对「已换 32MB 芯片」的机型扩容（config/ 下的 ezviz_cs-w3-wd1200g-32m.config）。
+#    18.06-k5.4 的 ipq40xx 同样带这个 DTS（79 个设备之一），而 config-18.06/ 下的
+#    ezviz_cs-w3-wd1200g.config 走的是**原厂 16MB** —— 一旦误扩容到 0x1E80000，
+#    16MiB 芯片写入越界，刷进去直接变砖。按 TARGET_CONFIG 精确区分两者。
+if ! echo "${TARGET_CONFIG:-}" | grep -qE '^ezviz.*-32m\.config$'; then
+  echo "==> [16] 非 32MB 改造机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 EZVIZ 分区扩容，保持原厂布局"
+elif [ -n "$IPQ40XX_DTS" ] && [ -f "$IPQ40XX_GMK" ]; then
   echo "==> [16] EZVIZ W3 32MB 闪存布局注入（DTS: $IPQ40XX_DTS）"
   python3 - "$IPQ40XX_DTS" "$IPQ40XX_GMK" <<'PYEOF'
 import re, sys
@@ -986,8 +992,8 @@ fi
 # ⚠️ 顺序前提：本段必须在 `make defconfig` 之前跑（diy-part2 正好在 feeds install
 #    之后、defconfig 之前），否则依赖变更不生效。
 # ===========================================================================
-if echo "${TARGET_CONFIG:-}" | grep -qE '^k2p\.config$'; then
-  echo "==> [20] K2P(16M) 体积瘦身：为 luci-app-ngrokc 腾空间"
+if echo "${TARGET_CONFIG:-}" | grep -qE '^(k2p|ezviz_cs-w3-wd1200g)\.config$'; then
+  echo "==> [20] 小闪存 16M 机型体积瘦身（${TARGET_CONFIG}）：为 luci-app-ngrokc 腾空间"
   SSRP_MK="package/helloworld/luci-app-ssr-plus/Makefile"
   MT7621_TMK="target/linux/ramips/mt7621/target.mk"
 
@@ -1027,6 +1033,35 @@ if echo "${TARGET_CONFIG:-}" | grep -qE '^k2p\.config$'; then
     fi
     grep -n '^FEATURES+=' "$MT7621_TMK" | sed 's/^/     /'
   fi
+  # 注：ipq40xx 的 nand 特性 / 强制包剔除不在这里做 —— 18.06 的 ipq40xx 用的是
+  #     target/linux/ipq40xx/Makefile（旧布局，没有 target.mk），
+  #     由本文件后面的第[21]段调用 scripts/patch-ipq40xx-slim.py 统一处理。
 else
-  echo "==> [20] 非 K2P 16M 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过体积瘦身"
+  echo "==> [20] 非小闪存 16M 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过体积瘦身"
+fi
+
+# ===========================================================================
+# [21] ipq40xx 强制包瘦身 —— 专供萤石 CS-W3-WD1200G **原厂 16MB**
+# ---------------------------------------------------------------------------
+# target/linux/ipq40xx/Makefile 用 target 级 DEFAULT_PACKAGES 把一批包硬塞进
+# 每台 ipq40xx 设备的镜像，这些包不在设备块的 DEVICE_PACKAGES 里，所以
+# .config 里写 =n 是删不掉的（defconfig 之后依然并入镜像包列表）：
+#   kmod-usb3 / kmod-usb-dwc3 / kmod-usb-dwc3-qcom  本机无 USB 口
+#   e2fsprogs                                      本机不挂外置存储
+#   wpad-openssl 与本 config 的 wpad-basic 互斥      不换会直接撞包
+#   外加 FEATURES:=... nand                          SPI NOR 无 UBI 卷
+# 详见 scripts/patch-ipq40xx-slim.py 头部注释。
+#
+# ⚠️ 只对**原厂 16MB** 那个 config 生效；23.05 的 -32m 机型不受影响。
+# ===========================================================================
+if echo "${TARGET_CONFIG:-}" | grep -qE '^ezviz_cs-w3-wd1200g\.config$'; then
+  IPQ_SLIM_PY="../scripts/patch-ipq40xx-slim.py"
+  if [ -f "$IPQ_SLIM_PY" ]; then
+    echo "==> [21] ipq40xx 强制包瘦身（萤石 W3 原厂 16MB）"
+    python3 "$IPQ_SLIM_PY" || { echo "  !! 错误：ipq40xx 精简失败"; exit 1; }
+  else
+    echo "  !! 警告：缺少 $IPQ_SLIM_PY，跳过 ipq40xx 精简（镜像可能超分区或撞 wpad 包）"
+  fi
+else
+  echo "==> [21] 非萤石 W3 原厂 16MB 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 ipq40xx 强制包瘦身"
 fi
