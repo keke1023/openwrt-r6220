@@ -80,7 +80,7 @@ TARGET_CONFIG="${TARGET_CONFIG:-}"
 #     （p186.txt: base-files Depends ... ubi-utils；fstools Depends ... ubi-utils），
 #     强制 =n 会被 kconfig 拉回 =y，直接触发校验0 失败。想省这 70KB 得改 fstools/base-files
 #     的 Makefile，风险远大于收益。
-if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns|k2p'; then
+if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns|k2p|wr1200js'; then
   echo "==> 16MB 机型（$TARGET_CONFIG）：追加共用瘦身项（conntrack ALG 助手）"
   FORCE_OFF="$FORCE_OFF \
 kmod-nf-nathelper-extra \
@@ -222,6 +222,70 @@ wpad-basic-wolfssl \
 "
 fi
 
+# ---------------------------------------------------------------------------
+# WR1200JS：开源 mt76 双芯片（MT7603E 2.4G + MT7612E 5G）
+# ---------------------------------------------------------------------------
+# 与 K2P 的区别：
+#   K2P 是 MT7615D 单芯片（mt7615e + 独立 firmware 包），上游 DEVICE_PACKAGES 本来是
+#   闭源 mt7615d，被 diy-part2 [18] 段换成开源；WR1200JS 上游就是开源的
+#   kmod-mt7603 + kmod-mt76x2，**不需要换驱动**，只需保证它们不被剃掉。
+#   ❗ 千万别把 K2P 段的 kmod-mt7603e / kmod-mt7612e 排除项抄过来 —— 那两个是
+#     「不存在包名」的防御项（真实包名是 kmod-mt7603 / kmod-mt76x2，驱动文件名才是
+#     mt7603e.ko / mt76x2e.ko），照抄会误伤本机唯一的两块无线芯片。
+# 必须兜底 =y：
+#   kmod-mt7603   MT7603E 2.4G（DEPENDS +kmod-mt76-core）
+#   kmod-mt76x2   MT7612E 5G（DEPENDS +kmod-mt76x2-common，后者带 mt7662.bin 固件）
+#   加上 mac80211 / cfg80211 / wpad-basic / wireless-regdb / hostapd-common
+# 必须 =n：
+#   mt7615 全家（本机没有该芯片）、闭源 mt7615d / luci-app-mtwifi、
+#   target.mk 默认的 wpad-openssl（与 wpad-basic 撞同一个 PROVIDES 名为 wpad）
+# USB：本机有一个 USB3.0 口，但本配置已砍整条 USB 链（没有 opkg，装不了存储驱动，
+#   留着也只是个不通的口）。DEVICE_PACKAGES 已由 diy-part2 [6/7/8] 段剔掉，
+#   这里再压一遍，防止 DEFAULT_PACKAGES.tweak 的 block-mount 之类翻回来。
+#   DTS 里 led 节点的 trigger-sources = <&xhci_ehci_port1>, <&ehci_port2> 不受影响
+#   —— 那是静态 phandle 引用，DTC 只校验节点存在，不要求对应驱动编入。
+if echo "$TARGET_CONFIG" | grep -qiE 'wr1200js'; then
+  echo "==> WR1200JS：开源无线栈（mt7603 + mt76x2）强制 =y，mt7615 全家 + USB 链强制 =n"
+  FORCE_ON="$FORCE_ON \
+kmod-mt7603 \
+kmod-mt76x2 \
+kmod-mac80211 \
+kmod-cfg80211 \
+wpad-basic \
+wireless-regdb \
+hostapd-common \
+"
+  FORCE_OFF="$FORCE_OFF \
+kmod-mt7615e \
+kmod-mt7615-firmware \
+kmod-mt7615d \
+luci-app-mtwifi \
+wpad-openssl \
+wpad-wolfssl \
+wpad \
+wpad-mini \
+wpad-basic-openssl \
+wpad-basic-wolfssl \
+kmod-usb-core \
+kmod-usb2 \
+kmod-usb3 \
+kmod-usb-ehci \
+kmod-usb-ohci \
+kmod-usb-dwc2 \
+kmod-usb-storage \
+kmod-usb-storage-extras \
+kmod-usb-storage-uas \
+kmod-usb-ledtrig-usbport \
+kmod-usb-hid \
+kmod-usb-net \
+kmod-usb-serial \
+usbutils \
+usb-modeswitch \
+libusb-1.0 \
+block-mount \
+"
+fi
+
 # 把最终剔除清单导出，供 CI 的「配置一致性校验」逐步核对
 #（该步骤据此判断：被我们强制 =n 的符号，是否被 kconfig 求解又翻回 y/m）
 FORCE_OFF_LIST="${FORCE_OFF_LIST:-/tmp/force-off.list}"
@@ -260,7 +324,7 @@ done
 #   kmod-ipt-offload → xt_FLOWOFFLOAD（含 --hw）
 #   kmod-nf-flow     → 置位 CONFIG_NF_FLOW_TABLE + CONFIG_NF_FLOW_TABLE_HW，
 #                      硬件卸载路径缺此符号会退化，故两者必须同时为 y
-if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns|k2p'; then
+if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns|k2p|wr1200js'; then
   for p in kmod-ipt-offload kmod-nf-flow; do
     sed -i "s/^CONFIG_PACKAGE_${p}=.*/CONFIG_PACKAGE_${p}=y/" .config
     grep -q "^CONFIG_PACKAGE_${p}=" .config || echo "CONFIG_PACKAGE_${p}=y" >> .config
@@ -354,13 +418,69 @@ if echo "$TARGET_CONFIG" | grep -qiE 'k2p'; then
 fi
 
 # ---------------------------------------------------------------------------
+# WR1200JS 专项复核：双芯片开源无线必须在、mt7615 全家不在、dropbear/opkg 不在
+# ---------------------------------------------------------------------------
+# 同样只「警告不失败」，致命项交给 build.yml 的「配置一致性校验」。
+# 本段存在的意义：把三种静默失败在编译日志里喊出来 ——
+#   ① 能开机没 wifi（kmod-mt7603 / kmod-mt76x2 被剃）
+#   ② mt7615 全家被 DEFAULT_PACKAGES 拉回（白占 ~1MB 且和 wpad-basic 抢 hostapd）
+#   ③ dropbear/opkg 没摘掉（用户明确不要，多占 ~160KB 安装）
+if echo "$TARGET_CONFIG" | grep -qiE 'wr1200js'; then
+  echo "--- [WR1200JS] 开源无线栈复核（必须 =y）---"
+  # 只查菜单可选项；kmod-mt76-core / kmod-mt76x2-common 是 HIDDEN:=1，
+  # 由 +kmod-xxx 依赖自动 select，硬写 =y 不生效，不该当失败条件。
+  MISSING=""
+  for p in kmod-mt7603 kmod-mt76x2 kmod-mac80211 kmod-cfg80211 wpad-basic; do
+    grep -qE "^CONFIG_PACKAGE_${p}=y$" .config || MISSING="$MISSING $p"
+  done
+  if [ -n "$MISSING" ]; then
+    echo "!! 警告：以下无线包未置 y，固件会「能开机、没有 wifi」："
+    for p in $MISSING; do echo "   $p"; done
+    echo "   排查：config 里是否误写 =n；DEVICE_PACKAGES 是否被 diy-part2 第 [6/7/8] 段误剔"
+  else
+    echo "OK：kmod-mt7603 + kmod-mt76x2 + wpad-basic 齐备"
+  fi
+
+  echo "--- [WR1200JS] mt7615 全家复核（必须未选中；本机没有该芯片）---"
+  BADM=$(grep -E '^CONFIG_PACKAGE_(kmod-mt7615e|kmod-mt7615-firmware|kmod-mt7615d|luci-app-mtwifi)=[ym]$' .config || true)
+  if [ -n "$BADM" ]; then
+    echo "$BADM"
+    echo "!! 警告：mt7615 相关包被选中，本机无此芯片，白占约 1MB，还会与 wpad-basic 抢 hostapd"
+  else
+    echo "OK：mt7615 全家均未选中"
+  fi
+
+  echo "--- [WR1200JS] USB / block-mount 复核（应全部未选中）---"
+  BADUSB=$(grep -E '^CONFIG_PACKAGE_(kmod-usb[^=]*|usbutils|usb-modeswitch|libusb[^=]*|block-mount)=[ym]$' .config || true)
+  if [ -n "$BADUSB" ]; then
+    echo "$BADUSB"
+    echo "!! 警告：仍有 USB/挂载包被选中（多为 DEFAULT_PACKAGES.tweak 拉回），体积会比预期略大"
+  else
+    echo "OK：USB 及 block-mount 全部未选中"
+  fi
+
+  echo "--- [WR1200JS] dropbear / opkg 复核（用户要求不要，应未选中）---"
+  BADD=$(grep -E '^CONFIG_PACKAGE_(dropbear|opkg)=[ym]$' .config || true)
+  if [ -n "$BADD" ]; then
+    echo "$BADD"
+    echo "!! 警告：dropbear/opkg 仍在 —— 说明 patch-drop-opkg.py 未生效（查 diy-part2 第 [22] 段）"
+    echo "   只影响「无 SSH / 多占体积」的预期，不影响固件可启动"
+  else
+    echo "OK：dropbear / opkg 均未选中"
+  fi
+
+  echo "--- [WR1200JS] PPPoE 复核（当主路由拨号用）---"
+  grep -E '^CONFIG_PACKAGE_(ppp|ppp-mod-pppoe)=' .config || echo "（未选中：本机将无法 PPPoE 拨号，只适合做 AP/旁路由）"
+fi
+
+# ---------------------------------------------------------------------------
 # 16MB 机型共用复核：ssr-plus 的 Shadowsocks(libev) 客户端必须在
 # ---------------------------------------------------------------------------
 # 2026-11-01 起两份 config 都显式选 Libev_Client（ss 协议保留可用）。
 # 这里只做提示，不 exit 1 —— 真正致命的判断交给 CI 的「配置一致性校验 / 校验 D」。
 # ⚠️ Client 是 kconfig choice：一旦 NONE_Client 与 Libev_Client 同时 =y，
 #    解析时只有一个生效，另一个会触发 “out of sync”。
-if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns|k2p'; then
+if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns|k2p|wr1200js'; then
   echo "--- ssr-plus 客户端选型复核（期望 Libev，ss 协议可用）---"
   grep -E '^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_(NONE|Libev)_Client=' .config || echo "（choice 尚未落盘）"
 

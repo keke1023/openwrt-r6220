@@ -757,7 +757,7 @@ fi
 #     b) 直接补丁 firewall 包的默认 firewall.config —— 首次刷入即带好选项，
 #        不依赖 uci-defaults 的执行时机
 # ---------------------------------------------------------------------------
-if echo "${TARGET_CONFIG:-}" | grep -qiE 'a3004ns|k2p'; then
+if echo "${TARGET_CONFIG:-}" | grep -qiE 'a3004ns|k2p|wr1200js'; then
   echo "==> [17] 注入硬件 offload（$TARGET_CONFIG）：fw3 flow_offloading_hw=1"
 
   FW_CONF="package/network/config/firewall/files/firewall.config"
@@ -992,7 +992,7 @@ fi
 # ⚠️ 顺序前提：本段必须在 `make defconfig` 之前跑（diy-part2 正好在 feeds install
 #    之后、defconfig 之前），否则依赖变更不生效。
 # ===========================================================================
-if echo "${TARGET_CONFIG:-}" | grep -qE '^(k2p|ezviz_cs-w3-wd1200g)\.config$'; then
+if echo "${TARGET_CONFIG:-}" | grep -qE '^(k2p|ezviz_cs-w3-wd1200g|wr1200js)\.config$'; then
   echo "==> [20] 小闪存 16M 机型体积瘦身（${TARGET_CONFIG}）：为 luci-app-ngrokc 腾空间"
   SSRP_MK="package/helloworld/luci-app-ssr-plus/Makefile"
   MT7621_TMK="target/linux/ramips/mt7621/target.mk"
@@ -1089,6 +1089,111 @@ if echo "${TARGET_CONFIG:-}" | grep -qE '^ezviz_cs-w3-wd1200g\.config$'; then
   else
     echo "  !! 警告：缺少 $DROP_OPKG_PY，opkg 将保留（多占约 75 KiB）"
   fi
+elif echo "${TARGET_CONFIG:-}" | grep -qE '^wr1200js\.config$'; then
+  # WR1200JS：用户明确要求「不要 dropbear、不要 opkg」，两者都在 DEFAULT_PACKAGES 里，
+  # 只能从 target.mk 层面摘（.config 的 =n 会被 defconfig 翻回，触发反向校验失败）。
+  # 代价：
+  #   - 无 opkg   → 运行期装不了包，LuCI「软件包」页面失效（overlay 够用但无 CLI）
+  #   - 无 dropbear → 无 SSH，只走 LuCI(uhttpd) 管理；failsafe 仅剩串口登录
+  # 已核：luci 元包 LUCI_DEPENDS 不含这两者；18.06 无 luci-app-dropbear。
+  DROP_OPKG_PY="../scripts/patch-drop-opkg.py"
+  if [ -f "$DROP_OPKG_PY" ]; then
+    echo "==> [22] 摘除 opkg + dropbear（WR1200JS，按用户要求只要 LuCI 管理）"
+    DROP_DEFAULT_PKGS="opkg dropbear" python3 "$DROP_OPKG_PY" include/target.mk \
+      || { echo "  !! 错误：默认包摘除失败"; exit 1; }
+  else
+    echo "  !! 警告：缺少 $DROP_OPKG_PY，opkg/dropbear 将保留（多占约 160 KiB 安装）"
+  fi
 else
-  echo "==> [22] 非萤石 W3 原厂 16MB 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），保留 opkg"
+  echo "==> [22] 非 ezviz/WR1200JS 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），保留 opkg/dropbear"
+fi
+
+# ===========================================================================
+# [23] WR1200JS：DEVICE_PACKAGES 补 -wpad-openssl（把默认 wpad-openssl 换成 wpad-basic）
+# ---------------------------------------------------------------------------
+# 为什么必须改源码 mk 而不能只写 config：
+#   target/linux/ramips/mt7621/target.mk 里有
+#       DEFAULT_PACKAGES += kmod-crypto-hw-eip93 wpad-openssl swconfig
+#   wpad-openssl 是「默认 y」身份；config 里写 wpad-openssl=n 会被 defconfig 翻回 =y，
+#   与本 config 选中的 wpad-basic 撞同一个 PROVIDES（wpad），opkg 安装期报
+#   check_data_file_clashes / 镜像里出现两份 hostapd。
+#
+# 手法：OpenWrt 的 include/target.mk 会把 DEFAULT_PACKAGES 里 "-pkg" 形式的项
+#   用 filter-out 从最终列表中剔掉，所以只要在**设备块**的 DEVICE_PACKAGES 里出现
+#   -wpad-openssl，默认列表里那个就会被摘掉 —— K2P 上游本来就是这么写的
+#   （DEVICE_PACKAGES := kmod-mt7615d luci-app-mtwifi -wpad-openssl）。
+#
+# 与前面第 [6/7/8] 段的关系：那段已经把 youhua_wr1200js 的 kmod-usb3 /
+#   kmod-usb-ledtrig-usbport 剔掉并把续行合并成单行，所以这里拿到的通常是
+#   "  DEVICE_PACKAGES := kmod-mt7603 kmod-mt76x2" 这样一行；本段仍按「逻辑行」
+#   处理（吃掉续行再拼），避免那段没跑时留下悬挂反斜杠。
+# 幂等：已含 -wpad-openssl 就跳过。
+# ===========================================================================
+if echo "${TARGET_CONFIG:-}" | grep -qE '^wr1200js\.config$'; then
+  MK="target/linux/ramips/image/mt7621.mk"
+  if [ -f "$MK" ]; then
+    echo "==> [23] WR1200JS：DEVICE_PACKAGES 补 -wpad-openssl（换用 wpad-basic）"
+    python3 - "$MK" <<'PYEOF'
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+key = "define Device/youhua_wr1200js"
+i = s.find(key)
+if i < 0:
+    print("  !! 错误：%s 里找不到 %s" % (p, key))
+    sys.exit(1)
+j = s.find("\nendef", i)
+if j < 0:
+    print("  !! 错误：%s 块未闭合（缺 endef）" % key)
+    sys.exit(1)
+
+block = s[i:j]
+lines = block.split("\n")
+hit = False
+for idx, ln in enumerate(lines):
+    if not re.match(r"^\s*DEVICE_PACKAGES\s*:?=", ln):
+        continue
+    hit = True
+    end = idx
+    while lines[end].rstrip().endswith("\\") and end + 1 < len(lines):
+        end += 1
+    merged = " ".join(x.rstrip().rstrip("\\").strip() for x in lines[idx:end + 1])
+    merged = re.sub(r"\s+", " ", merged).strip()
+    if "-wpad-openssl" in merged.split():
+        print("  已含 -wpad-openssl，跳过（幂等）：%s" % merged)
+        sys.exit(0)
+    newline = "  " + merged + " -wpad-openssl"
+    lines[idx:end + 1] = [newline]
+    print("  before: %s" % merged)
+    print("  after : %s" % newline.strip())
+    break
+
+if not hit:
+    lines.insert(1, "  DEVICE_PACKAGES := -wpad-openssl")
+    print("  块内无 DEVICE_PACKAGES 行，已插入：DEVICE_PACKAGES := -wpad-openssl")
+
+newblock = "\n".join(lines)
+s2 = s[:i] + newblock + s[j:]
+
+# 自检：define/endef 数量不变，且排除项已落下
+d1, e1 = len(re.findall(r"^define ", s, re.M)), len(re.findall(r"^endef", s, re.M))
+d2, e2 = len(re.findall(r"^define ", s2, re.M)), len(re.findall(r"^endef", s2, re.M))
+if (d1, e1) != (d2, e2):
+    print("  !! 错误：define/endef 数量变化 %s -> %s，放弃写入" % ((d1, e1), (d2, e2)))
+    sys.exit(1)
+if "-wpad-openssl" not in s2[s2.find(key):s2.find("\nendef", s2.find(key))]:
+    print("  !! 错误：写入后块内仍无 -wpad-openssl")
+    sys.exit(1)
+
+open(p, "w", encoding="utf-8").write(s2)
+print("  patched %s: youhua_wr1200js 已排除 wpad-openssl" % p)
+PYEOF
+    [ $? -ne 0 ] && { echo "  !! 错误：WR1200JS 的 DEVICE_PACKAGES 补丁失败"; exit 1; }
+    grep -n -A 6 'define Device/youhua_wr1200js' "$MK" | sed 's/^/     /'
+  else
+    echo "  !! 错误：找不到 $MK"
+    exit 1
+  fi
+else
+  echo "==> [23] 非 WR1200JS 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 wpad-openssl 排除"
 fi

@@ -81,9 +81,13 @@ echo "==> helloworld 已就绪，luci-app-ssr-plus 来自：package/helloworld/l
 #   ezviz_cs-w3-wd1200g.config —— 萤石 W3 原厂 16MB（ipq40xx / IPQ4018 + 128MB RAM）。
 #       注意与 23.05 的 ezviz_cs-w3-wd1200g-32m.config（已换 32MB 芯片）区分：
 #       这里只 pin 原厂 16MB 那个，32m 版仍走 master 最新。
+#   wr1200js.config     —— 友华 WR1200JS（ramips/mt7621，16MB SPI NOR / 128MB DDR3）。
+#       开源 mt76 双芯片：MT7603E(2.4G) + MT7612E(5G)，上游本来就是开源驱动，无闭源可换。
+#       相对 k2p 少了 mt7615 的独立 firmware 包、且去掉了 dropbear/opkg，但同属 16MB 档，
+#       必须一起 pin（走 master 最新 xray v26 会直接撑爆 15.7MiB 的 firmware 分区）。
 # ⚠️ 这里必须写精确名：早期写成 *k2p*，会把 23.05 的 phicomm_k2p-32m.config（32MB，
 #    本来该走 master 最新 xray）一起 pin 到 a201839 + 旧 xray，属于误伤。
-SMALL_FLASH_PATTERNS="a3004ns-dual.config k2p.config ezviz_cs-w3-wd1200g.config"
+SMALL_FLASH_PATTERNS="a3004ns-dual.config k2p.config ezviz_cs-w3-wd1200g.config wr1200js.config"
 PIN_COMMIT="a201839"
 
 if [ -n "$SMALL_FLASH_PATTERNS" ] && [ -n "$PIN_COMMIT" ]; then
@@ -208,6 +212,25 @@ case "$TARGET_CONFIG" in
       fi
     done
     echo "    OK：kmod-mt7615e / mt7615-common / mt7615-firmware / mt76-core / mt76-connac 齐备"
+    echo "    mt76 版本：$(grep -m1 '^PKG_SOURCE_DATE:=' "$MT76_MK" | cut -d= -f2)"
+    ;;
+  *wr1200js*)
+    # WR1200JS：上游 DEVICE_PACKAGES 就是 kmod-mt7603 + kmod-mt76x2（开源），
+    #   不需要像 K2P 那样换驱动，但要确认本分支的 mt76 里确实定义了这两个包
+    #   —— 少了任一 kmod，固件会「能开机、没 wifi」，而且不报错。
+    echo "==> WR1200JS：校验本分支自带的开源 mt76 包（mt7603 + mt76x2）"
+    MT76_MK="package/kernel/mt76/Makefile"
+    if [ ! -f "$MT76_MK" ]; then
+      echo "!! 错误：$MT76_MK 不存在 —— 本分支没有 mt76，开源无线方案不成立"
+      exit 1
+    fi
+    for sym in mt7603 mt76x2 mt76x2-common mt76-core; do
+      if ! grep -q "^define KernelPackage/$sym\$" "$MT76_MK"; then
+        echo "!! 错误：$MT76_MK 里没有 define KernelPackage/$sym，开源无线方案不成立"
+        exit 1
+      fi
+    done
+    echo "    OK：mt7603 / mt76x2 / mt76x2-common / mt76-core 齐备"
     echo "    mt76 版本：$(grep -m1 '^PKG_SOURCE_DATE:=' "$MT76_MK" | cut -d= -f2)"
     ;;
 esac

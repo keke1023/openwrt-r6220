@@ -350,6 +350,39 @@ jobs:
             echo "OK：K2P 开源无线栈齐备且无闭源驱动"
           fi
 
+          if echo "$CFG" | grep -qE '^wr1200js\.config$'; then
+            # WR1200JS 反向校验：开源 mt7603 + mt76x2 必须在，mt7615 全家必须不在。
+            # 本机是 MT7603E(2.4G) + MT7612E(5G) 两颗独立芯片，DTS 走 pcie0/pcie1，
+            # 上游 DEVICE_PACKAGES 就是开源的，所以这里只验「在不在」，不涉及换驱动。
+            # 少了任一 kmod 的后果与 K2P 一样：能开机、没 wifi，且编译不报错。
+            MISS=""
+            for p in kmod-mt7603 kmod-mt76x2 kmod-mac80211 kmod-cfg80211 wpad-basic; do
+              grep -qE "^CONFIG_PACKAGE_${p}=y$" /tmp/resolved.config || MISS="$MISS $p"
+            done
+            if [ -n "$MISS" ]; then
+              echo "!! 失败：以下开源无线包在 kconfig 解析后不是 y："
+              for p in $MISS; do echo "   CONFIG_PACKAGE_${p}"; done
+              echo "!! 排查：config 里是否误写 =n；mt7621.mk 的 DEVICE_PACKAGES 是否被 diy-part2 第 [6/7/8] 段误剔"
+              exit 1
+            fi
+            echo "   隐藏依赖链（由 select 自动拉入，仅供参考）："
+            grep -E '^CONFIG_PACKAGE_(kmod-mt76-core|kmod-mt76x2-common|kmod-mt76)=' /tmp/resolved.config || true
+            BADM=$(grep -E '^CONFIG_PACKAGE_(kmod-mt7615e|kmod-mt7615-firmware|kmod-mt7615d|luci-app-mtwifi)=(y|m)$' /tmp/resolved.config || true)
+            if [ -n "$BADM" ]; then
+              echo "!! 失败：mt7615 相关包被选中（本机没有该芯片，多占约 1MB，且与 wpad-basic 抢 hostapd）："
+              echo "$BADM"
+              exit 1
+            fi
+            BADW=$(grep -E '^CONFIG_PACKAGE_(wpad-openssl|wpad-wolfssl|wpad|wpad-mini)=(y|m)$' /tmp/resolved.config || true)
+            if [ -n "$BADW" ]; then
+              echo "!! 失败：除 wpad-basic 之外还有别的 wpad 变体被选中（PROVIDES 冲突）："
+              echo "$BADW"
+              echo "!! 排查：target.mk 的 DEFAULT_PACKAGES += wpad-openssl 是否已被 diy-part2 第 [23] 段用 -wpad-openssl 排除"
+              exit 1
+            fi
+            echo "OK：WR1200JS 开源双芯片齐备（mt7603 + mt76x2），无 mt7615 / 无多余 wpad"
+          fi
+
           # ---- 校验 C：luci 硬依赖必须齐备（上次 Error 255 的直接原因）----
           for p in libiwinfo libiwinfo-lua libiwinfo-data; do
             if ! grep -qE "^CONFIG_PACKAGE_${p}=y$" .config; then
@@ -364,7 +397,7 @@ jobs:
           #   默认值在 mipsel 上是 Libev_Client。config 里若误写 NONE_Client=y，
           #   ss-local/ss-redir 会静默消失 —— 编译不报错，刷进机器却发现 ss 节点起不来。
           #   这里用解析后的视图判一次，避免「能编、功能没了」这种最贵的失败。
-          if echo "$CFG" | grep -qE '^(a3004ns-dual|k2p)\.config$'; then
+          if echo "$CFG" | grep -qE '^(a3004ns-dual|k2p|wr1200js)\.config$'; then
             if ! grep -qE '^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Libev_Client=y$' /tmp/resolved.config; then
               echo "!! 失败：Shadowsocks-libev 客户端未被选中（ss 协议将不可用）"
               echo "   排查：config 里是否残留 INCLUDE_Shadowsocks_NONE_Client=y（choice 互斥）"
@@ -398,10 +431,10 @@ jobs:
               exit 1
             fi
           done
-          if echo "${{ matrix.config }}" | grep -qE '^k2p\.config$'; then
+          if echo "${{ matrix.config }}" | grep -qE '^(k2p|wr1200js)\.config$'; then
             for p in luci-app-ngrokc ngrokc; do
               grep -qE "^CONFIG_PACKAGE_${p}=y$" .config \
-                || { echo "!! 失败：k2p 期望 $p=y，最终 .config 里没有"; exit 1; }
+                || { echo "!! 失败：${{ matrix.config }} 期望 $p=y，最终 .config 里没有"; exit 1; }
             done
             echo "OK：核心包已选中（luci-app-ssr-plus / xray-core / luci-app-ngrokc / ngrokc）"
           fi
@@ -412,12 +445,12 @@ jobs:
           # 回落到默认值而我们看不出来（体积检查只会看到镜像偏大，却不知原因）。
           BS=$(grep -E '^CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=' /tmp/resolved.config | cut -d= -f2)
           echo "==> squashfs 块大小（kconfig 解析结果）：${BS:-未设置→默认 256} KiB"
-          if [ "${{ matrix.config }}" = "k2p.config" ]; then
+          if echo "${{ matrix.config }}" | grep -qE '^(k2p|wr1200js)\.config$'; then
             if [ "${BS:-}" != "1024" ]; then
-              echo "!! 失败：k2p 期望 CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=1024，实际 '${BS:-}'"
+              echo "!! 失败：${{ matrix.config }} 期望 CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=1024，实际 '${BS:-}'"
               exit 1
             fi
-            echo "OK：k2p 的 squashfs 块大小 = 1024 KiB（xz 字典更大，镜像更小）"
+            echo "OK：${{ matrix.config }} 的 squashfs 块大小 = 1024 KiB（xz 字典更大，镜像更小）"
           fi
 
           echo "OK：剔除项在 kconfig 解析后仍未选中，.config 与 make 的视图一致"
@@ -463,7 +496,7 @@ jobs:
         if: steps.compile.outputs.status == 'success'
         run: |
           # ── 硬件 offload 落地校验（本机型强制启用，缺一项就直接失败）──
-          if echo "${{ matrix.config }}" | grep -qE '^(a3004ns-dual|k2p)\.config$'; then
+          if echo "${{ matrix.config }}" | grep -qE '^(a3004ns-dual|k2p|wr1200js)\.config$'; then
             KC=$(ls -1 openwrt/build_dir/target-*/linux-*/linux-*/.config 2>/dev/null | head -1)
             if [ -n "$KC" ]; then
               echo "==> 内核 flowtable 符号（$KC）"
@@ -509,7 +542,7 @@ jobs:
           for p in luci-app-ssr-plus xray-core; do
             grep -q "^$p " "$MAN" || MISSING="$MISSING $p"
           done
-          if echo "${{ matrix.config }}" | grep -qE '^k2p\.config$'; then
+          if echo "${{ matrix.config }}" | grep -qE '^(k2p|wr1200js)\.config$'; then
             for p in ngrokc luci-app-ngrokc; do
               grep -q "^$p " "$MAN" || MISSING="$MISSING $p"
             done
@@ -522,17 +555,37 @@ jobs:
           fi
           echo "OK：核心功能包齐全（luci-app-ssr-plus / xray-core / ngrokc 均在 manifest，共 $(wc -l < "$MAN") 包）"
 
+          # ── WR1200JS：dropbear / opkg 必须不在 manifest（用户明确要求不要）──
+          # 为什么单独验：这两个是 include/target.mk DEFAULT_PACKAGES 的硬编码项，
+          # 正常情况下靠 diy-part2 第 [22] 段调用 patch-drop-opkg.py 从源码摘掉。
+          # 一旦摘除没生效（脚本缺失 / 路径不对 / 被某个包 +dropbear 拉回），
+          # 固件照样能启动，只是多占约 160KB 安装体积且「以为没有 SSH 其实有」，
+          # 属于看不见的偏差，必须显式拦住。
+          if echo "${{ matrix.config }}" | grep -qE '^wr1200js\.config$'; then
+            BADD=""
+            for p in dropbear opkg; do
+              grep -q "^$p " "$MAN" && BADD="$BADD $p"
+            done
+            if [ -n "$BADD" ]; then
+              echo "!! 失败：manifest 里仍有【${BADD# }】"
+              echo "   排查：scripts/patch-drop-opkg.py 是否被 diy-part2 第 [22] 段调用成功"
+              echo "         （日志里应有「已从 include/target.mk 的 DEFAULT_PACKAGES 摘除」）"
+              exit 1
+            fi
+            echo "OK：manifest 中无 dropbear / opkg（按用户要求，只保留 LuCI 管理）"
+          fi
+
           # 仅对 16MB SPI NOR 机型做硬校验：镜像必须小于 firmware 分区，
           # 且至少留 1MiB 给 overlay（配置/日志/opkg 都写在 overlay 上）。
           #   分区大小来自设备定义 IMAGE_SIZE：
           #     a3004ns-dual = 16128k（DTS: reg = <0x40000 0xfc0000>）
           #     phicomm_k2p  = 16064k（diy-part2 第19段覆盖 DTS 为 reg = <0x50000 0xfb0000>，
           #                            弃用原厂 permanent_config 换回 320k）
-          if echo "${{ matrix.config }}" | grep -qE '^(a3004ns-dual|k2p)\.config$'; then
+          if echo "${{ matrix.config }}" | grep -qE '^(a3004ns-dual|k2p|wr1200js)\.config$'; then
             SYS=$(ls -1 *squashfs-sysupgrade.bin 2>/dev/null | head -1)
             [ -z "$SYS" ] && { echo "!! 未找到 squashfs-sysupgrade 镜像"; exit 1; }
             SZ=$(stat -c%s "$SYS")
-            if echo "${{ matrix.config }}" | grep -qE '^k2p\.config$'; then
+            if echo "${{ matrix.config }}" | grep -qE '^(k2p|wr1200js)\.config$'; then
               LIMIT=$((16064*1024)); LIMITK=16064
             else
               LIMIT=$((16128*1024)); LIMITK=16128
