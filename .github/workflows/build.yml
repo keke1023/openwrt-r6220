@@ -103,17 +103,30 @@ jobs:
           sudo apt-get clean
           df -hT $PWD
 
+      # apt 加固（血泪）：原来的裸 apt-get 没有任何超时，只要某个源/某个大包卡住，
+      # 这一步就会一路挂到 job 的 6 小时上限，而且日志里一行输出都没有，完全无法诊断。
+      # 实测：run 41471719379（2026-11-02）在 ubuntu-22.04 上卡此步 90 分钟无进展，
+      # 而 run 41289510808 同样的包只用了 72 秒 —— 正常基线就是 1~3 分钟。
+      # 现在改成：每个 apt 调用都套 timeout + 强制 IPv4 + 重试 3 次，失败立即退出。
       - name: 安装编译依赖
+        timeout-minutes: 40
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils \
-            bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex \
-            gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool \
-            libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-            libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev \
-            libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf qemu-utils \
-            rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim \
-            wget xmlto xxd zlib1g-dev jq python3-pyelftools
+          APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::ForceIPv4=true"
+          PKGS="ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev jq python3-pyelftools"
+          sudo timeout 300 apt-get $APT_OPTS update || echo "!! apt-get update 超时或部分源失败，仍继续尝试安装"
+          ok=0
+          for i in 1 2 3; do
+            echo "--- 编译依赖安装：第 $i 次尝试（上限 700s）---"
+            if sudo timeout 700 apt-get $APT_OPTS install -y $PKGS; then ok=1; break; fi
+            echo "!! 第 $i 次失败或超时，20s 后重试"
+            sleep 20
+            sudo timeout 120 apt-get $APT_OPTS update || true
+          done
+          if [ "$ok" != "1" ]; then
+            echo "!! 编译依赖安装失败（3 次重试均未成功），提前报错退出，不再空挂到 6 小时上限"
+            exit 1
+          fi
+          echo "OK：编译依赖安装完成"
 
       - name: 克隆源码（分支由 source_branch 输入决定，默认 openwrt-23.05）
         run: git clone --depth 1 $REPO_URL -b "${{ inputs.source_branch || env.REPO_BRANCH }}" openwrt
