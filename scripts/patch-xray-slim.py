@@ -1,44 +1,59 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-给 helloworld 的 xray-core 加一个 Build/Prepare 覆盖，在源码解压之后
-把 main/distro/all/all.go 里体积最大的那些「可选模块」空导入删掉。
+给 helloworld 的 xray-core 加一个 Build/Prepare 覆盖，在源码解压之后做两件事：
 
-原理：xray 的 main/distro/all/all.go 用一堆 `_ "github.com/xtls/xray-core/..."` 
-空导入做编译期注册。Go 只会链接被引用的包，删掉这些空导入后，
-对应的协议/传输实现（以及它们的第三方依赖，比如 quic-go、grpc、protobuf）
-就完全不参与编译，二进制直接瘦一大圈。
+【A】删掉 main/distro/all/all.go 里用不到的空导入
+     xray 用 `_ "github.com/xtls/xray-core/..."` 做编译期注册。Go 只链接被引用的包，
+     删掉这些空导入后，对应实现及其第三方依赖就完全不参与编译。
 
-删掉的（本机型用不到）：
-  transport/internet/quic          -> quic-go，最大的一块（约 4MB 代码）
-  transport/internet/grpc          -> google.golang.org/grpc + protobuf（约 3MB）
-  transport/internet/kcp           -> mkcp 传输
-  transport/internet/domainsocket  -> unix socket 传输
-  proxy/wireguard                  -> WireGuard 出站
-  proxy/loopback                   -> loopback 出站
-  app/reverse                      -> 反向代理
-  app/metrics                      -> 指标导出
-  app/observatory(+command)        -> 观测/健康检查
-  main/toml, main/yaml             -> 非 JSON 配置解析器
+【B】摘掉 CLI 的 api 子命令，真正切断 gRPC 依赖链
+     v1 只删了 transport/internet/grpc（传输层），但下面这些包全都
+     `import "google.golang.org/grpc"`：
+         app/commander             （API 服务宿主）
+         app/log/command           （LoggerService）
+         app/proxyman/command      （HandlerService）
+         app/stats/command         （StatsService）
+     而 main/commands/all 又 import main/commands/all/api，
+     api 再把这四个包拉一遍 —— 所以 v1 的 grpc 实际白删。
+     v2 必须同时改 main/commands/all/commands.go，删掉 api 的 import 和 api.CmdAPI。
 
-保留的：vless(in/outbound)、reality、tls、tcp、udp、websocket、http、
-vmess、shadowsocks、trojan、socks、dokodemo、freedom、blackhole、dns，
-以及 dispatcher/proxyman/router/stats/policy/log 等必需 app。
-→ vless+reality 完整可用，SS/SSR（走 shadowsocks-libev，独立二进制）不受影响。
+     安全性已核实：luci-app-ssr-plus 187-2 的
+     root/usr/share/shadowsocksr/gen_config.lua 生成的 Xray 配置里，
+     `api` / `stats` / `policy` 出现 0 次，只有 log / inbounds / outbounds / routing；
+     init.d 与 control.lua 也没有 `xray api` 调用。
+     → 删掉 commander 链后 ssr-plus 照常启动，不存在「配置里有 api 段却无 app 注册」的风险。
+
+删掉的模块清单：
+  A 组（协议/传输，本机型用不到）
+    transport/internet/quic          -> quic-go
+    transport/internet/grpc          -> gRPC 传输层
+    transport/internet/kcp           -> mkcp
+    transport/internet/domainsocket  -> unix socket
+    proxy/wireguard, proxy/loopback, app/reverse, app/metrics
+    app/observatory(+command), main/toml, main/yaml
+  B 组（gRPC API 链，本次新增）
+    app/commander, app/log/command, app/proxyman/command, app/stats/command
+
+保留：vless(in/out) + reality + tls + tcp + udp + websocket + http + vmess +
+shadowsocks + trojan + socks + dokodemo + freedom + blackhole + dns +
+dispatcher/proxyman/router/stats/policy/log。
+→ vless+reality 完整可用；SS/SSR 走 shadowsocks-libev 独立二进制，不受影响。
 
 用法：
   python3 patch-xray-slim.py package/helloworld/xray-core/Makefile
 
-幂等：Makefile 里已有 XRAY_SLIM_MODULES 标记就直接跳过，不改第二次。
+幂等：Makefile 里已有 XRAY_SLIM_VERSION := 2 就直接跳过。
 """
 
 import sys
 import os
 
-MARKER = "XRAY_SLIM_MODULES"
+VERSION_MARK = "XRAY_SLIM_VERSION := 2"
+LEGACY_MARK = "XRAY_SLIM_MODULES"
 
-# 要剔除的模块（相对 github.com/xtls/xray-core/ 的子路径）
-DROP = [
+# A 组：协议 / 传输
+DROP_TRANSPORT = [
     "transport/internet/quic",
     "transport/internet/grpc",
     "transport/internet/kcp",
@@ -53,20 +68,45 @@ DROP = [
     "main/yaml",
 ]
 
-BLOCK = """# ---- xray 体积精简（scripts/patch-xray-slim.py 注入，勿手改）----
-# 删掉 all.go 里的空导入 = 对应包不参与编译。省下的是 quic-go / grpc / protobuf
-# 这几坨第三方依赖，是 16MB flash 上最肥的一块。
+# B 组：gRPC API 链（删完这组，google.golang.org/grpc 才真正退出编译）
+DROP_GRPC_API = [
+    "app/commander",
+    "app/log/command",
+    "app/proxyman/command",
+    "app/stats/command",
+]
+
+DROP = DROP_TRANSPORT + DROP_GRPC_API
+
+BLOCK = """# ---- xray 体积精简 v2（scripts/patch-xray-slim.py 注入，勿手改）----
+# A 组：删 all.go 空导入 => 对应包不参与编译，顺带甩掉 quic-go 等第三方依赖
+# B 组：删 commander 及三个 */command => 切断 google.golang.org/grpc
+#       同时改 main/commands/all/commands.go，摘掉 CLI 的 api 子命令
+XRAY_SLIM_VERSION := 2
 XRAY_SLIM_MODULES := \\
 %s
 
 define Build/Prepare
 \t$(call Build/Prepare/Default)
-\t@echo "==> xray 精简：从 all.go 剔除 $(words $(XRAY_SLIM_MODULES)) 个可选模块"
+\t@echo "==> xray 精简 v2：从 all.go 剔除 $(words $(XRAY_SLIM_MODULES)) 个模块"
 \t@for m in $(XRAY_SLIM_MODULES); do \\
 \t\tsed -i "\\|github.com/xtls/xray-core/$$m\\"|d" $(PKG_BUILD_DIR)/main/distro/all/all.go || exit 1; \\
 \tdone
 \t@n=$$(grep -c '^[[:space:]]*_ "' $(PKG_BUILD_DIR)/main/distro/all/all.go || true); \\
-\t\techo "==> all.go 剩余注册行: $$n（精简前 55 行左右）"
+\t\techo "==> all.go 剩余注册行: $$n（原始 54 行）"
+\t@C=$(PKG_BUILD_DIR)/main/commands/all/commands.go; \\
+\tif [ -f "$$C" ]; then \\
+\t\tsed -i '\\|github.com/xtls/xray-core/main/commands/all/api"|d' $$C || exit 1; \\
+\t\tsed -i '/^[[:space:]]*api\\.CmdAPI,/d' $$C || exit 1; \\
+\t\tif grep -q 'CmdAPI' $$C; then \\
+\t\t\techo "!! 错误：api.CmdAPI 未完全移除，grpc 仍会被链接" >&2; exit 1; \\
+\t\tfi; \\
+\t\techo "==> 已摘除 CLI 的 api 子命令（切断 gRPC 依赖链）"; \\
+\telse \\
+\t\techo "!! 警告：找不到 main/commands/all/commands.go，gRPC 可能仍在" >&2; \\
+\tfi
+\t@echo "==> 残留 grpc 引用自检（应为空）："; \\
+\tgrep -rl 'google.golang.org/grpc' $(PKG_BUILD_DIR)/app $(PKG_BUILD_DIR)/main 2>/dev/null | head -5 || true
 endef
 """
 
@@ -89,9 +129,14 @@ def main():
     with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
         src = f.read()
 
-    if MARKER in src:
-        print("==> xray 精简补丁已存在，跳过（幂等）")
+    if VERSION_MARK in src:
+        print("==> xray 精简 v2 补丁已存在，跳过（幂等）")
         return 0
+
+    if LEGACY_MARK in src:
+        print("!! 错误：检测到 v1 精简补丁（只删传输层 grpc，无效）。"
+              "请重新拉取干净的 helloworld 源码后再打 v2。", file=sys.stderr)
+        return 1
 
     # 插在 include $(INCLUDE_DIR)/package.mk 之后：package.mk 定义了
     # Build/Prepare/Default，而 golang-package.mk 只覆盖 Build/Compile，
@@ -109,7 +154,6 @@ def main():
         print("==> 警告：未找到 package.mk include，改为插在 define Package/xray-core 之前")
     else:
         insert_at = idx + len(anchor)
-        # 吃掉该行剩余部分直到换行
         nl = src.find("\n", insert_at)
         insert_at = (nl + 1) if nl >= 0 else len(src)
 
@@ -119,9 +163,14 @@ def main():
     with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
         f.write(out)
 
-    print("==> 已注入 xray 精简 Build/Prepare（%d 个模块）" % len(DROP))
-    for m in DROP:
-        print("     - %s" % m)
+    print("==> 已注入 xray 精简 v2 Build/Prepare（共 %d 个模块）" % len(DROP))
+    print("    [A 组 协议/传输] %d 个" % len(DROP_TRANSPORT))
+    for m in DROP_TRANSPORT:
+        print("       - %s" % m)
+    print("    [B 组 gRPC API 链] %d 个" % len(DROP_GRPC_API))
+    for m in DROP_GRPC_API:
+        print("       - %s" % m)
+    print("    + 摘除 commands.go 里的 api 子命令")
     print("==> Makefile: %s (%d 行)" % (path, out.count("\n")))
     return 0
 

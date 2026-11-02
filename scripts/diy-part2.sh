@@ -1065,3 +1065,30 @@ if echo "${TARGET_CONFIG:-}" | grep -qE '^ezviz_cs-w3-wd1200g\.config$'; then
 else
   echo "==> [21] 非萤石 W3 原厂 16MB 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 ipq40xx 强制包瘦身"
 fi
+
+# ===========================================================================
+# [22] 摘掉 opkg —— 专供萤石 CS-W3-WD1200G **原厂 16MB**
+# ---------------------------------------------------------------------------
+# opkg 在 18.06 是 include/target.mk 里 DEFAULT_PACKAGES 的硬编码项。
+# 在 .config 里写 CONFIG_PACKAGE_opkg=n 没用：defconfig 会按默认值翻回 =y，
+# 然后触发后面的 kconfig 反向校验（任何 =n 被翻回 =y 即判失败）。
+# 所以只能从 target.mk 层面摘。
+#
+# 已用固件内的 opkg 元数据核实：
+#   176 个包的 Depends 里没有任何一个依赖 opkg
+#   luci-lib-ipkg 只依赖 libc + luci-base，不会把它拉回来
+#   镜像组装走宿主侧 opkg-cl，摘掉目标端 opkg 不影响打包
+# 收益：/bin/opkg 129.7 KiB + info 元数据，压缩后约 75 KiB
+# 副作用：LuCI「软件包」页面失效（overlay 只有 ~150 KiB，本来也装不了东西）
+# ===========================================================================
+if echo "${TARGET_CONFIG:-}" | grep -qE '^ezviz_cs-w3-wd1200g\.config$'; then
+  DROP_OPKG_PY="../scripts/patch-drop-opkg.py"
+  if [ -f "$DROP_OPKG_PY" ]; then
+    echo "==> [22] 摘除 opkg（萤石 W3 原厂 16MB，overlay 空间不足以装包）"
+    python3 "$DROP_OPKG_PY" include/target.mk || { echo "  !! 错误：opkg 摘除失败"; exit 1; }
+  else
+    echo "  !! 警告：缺少 $DROP_OPKG_PY，opkg 将保留（多占约 75 KiB）"
+  fi
+else
+  echo "==> [22] 非萤石 W3 原厂 16MB 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），保留 opkg"
+fi
