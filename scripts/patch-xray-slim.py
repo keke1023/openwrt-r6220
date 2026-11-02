@@ -36,15 +36,33 @@ v3 改走官方机制：把改动做成 unified diff 放进包的 `patches/` 目
     init.d 与 control.lua 也没有 `xray api` 调用 → 删掉后 ssr-plus 照常启动。
 
 003-drop-tls-grpc.patch
-    把 transport/internet/tls/grpc.go 掏空成一行 `package tls`。
-    ★ 这是 v3 首轮只省 37 KB 的元凶：只跑 001+002 时 xray 二进制里
-    google.golang.org/grpc 仍在，因为 **tls 传输包自己 import grpc** ——
-    文件 tls/grpc.go 提供 NewGrpcUtls（gRPC 的 uTLS 凭据），
-    而 tls 包为 reality 必须保留，于是 grpc 顺着它整条链被链接进来。
-    该文件导出的 NewGrpcUtls / grpcUtls / grpcUtlsInfo 全仓只在它自己内部使用
-    （GitHub 代码搜索确认 total_count=1，唯一调用方是已删除的
-    transport/internet/grpc），掏空后 tls 包其余文件不受影响。
-    utls 本身仍被 reality / vless / ech 使用，保留不动。
+    切断 grpc 全链（6 个文件，230 行）：
+      1) transport/internet/tls/grpc.go 掏空 —— tls 包自己 import grpc/credentials
+         （NewGrpcUtls），而 tls 为 reality 必须保留，这是 v3 首轮只省 37 KB 的元凶；
+      2) infra/conf/grpc.go 掏空 —— 切断 conf -> transport/internet/grpc 传输层；
+      3) infra/conf/api.go 掏空 —— 切断 conf -> app/commander + 5 个 command 服务。
+         ★ 这才是 grpc-go 一直留在二进制里的真正原因：配置解析器 import commander；
+      4) infra/conf/transport.go 删 GRPCConfig/GUNConfig 字段与 Build 分支；
+      5) infra/conf/transport_internet.go 删 StreamConfig 同名字段与 Build 分支；
+      6) infra/conf/xray.go 删 API 字段 + Override 块 + Build 块。
+    实测（run 41458593954）：xray 23,675,652 -> 21,537,356 B（-2.04 MiB），
+    二进制内 google.golang.org/grpc / transport/internet/grpc 命中数均为 0，
+    vless 217 次、realitySettings 2 次、transport/internet/tls 193 次，功能基石完好。
+    安全性：ssr-plus gen_config.lua 不生成 api 段，init.d 无 `xray api` 调用；
+    配置若残留 "api" 字段会被 json 静默忽略。
+
+004-drop-wireguard-quic.patch
+    再砍三块（2026-11-03，7 个文件 585 行）：
+      1) wireguard outbound：掏空 infra/conf/wireguard.go + 删 xray.go 的
+         "wireguard" 注册行 -> 带走 proxy/wireguard -> 带走整条 gvisor netstack
+         （gvisor 全仓只被 proxy/wireguard 引用，是最大的一头）；
+      2) QUIC 传输：删 infra/conf/transport{,_internet}.go 的 QUICConfig 与
+         transport/internet/quic 引用；
+      3) DoQ + QUIC 嗅探：掏空 app/dns/nameserver_quic.go、删 nameserver.go 的
+         quic+local 分支、删 app/dispatcher/sniffer.go 的 quic.SniffQUIC 注册
+         -> quic-go 本体随之退出。
+    影响：vless+reality / vmess / trojan / ss 全不受影响；不使用 QUIC 传输、
+    WireGuard 出站与 DoQ 解析即可。配置若引用这些协议会报 unknown protocol。
 
 【保留】
 vless(in/out) + reality + tls + tcp + udp + websocket + http + vmess + shadowsocks +
@@ -66,6 +84,7 @@ PATCH_NAMES = [
     "001-slim-modules.patch",
     "002-drop-grpc-api.patch",
     "003-drop-tls-grpc.patch",
+    "004-drop-wireguard-quic.patch",
 ]
 
 # v1/v2 注入块的起始标记（需清理掉，否则 Build/Prepare 覆盖会干扰判断）
@@ -171,8 +190,8 @@ def main():
 
     print("==> xray 精简 v3 就绪：补丁位于 %s（%d 个）" % (dst_dir, len(PATCH_NAMES)))
     print("    Prepare 阶段由 Build/Patch 自动应用（PATCH_DIR=./patches），无需改 Makefile")
-    print("    预期：all.go 注册行 54 -> 38，google.golang.org/grpc 退出编译")
-    print("    注意 003 是关键：tls/grpc.go 会把 grpc 重新拖回来，只跑 001+002 只能省几十 KB")
+    print("    预期：google.golang.org/grpc / gvisor / quic-go 全部退出编译")
+    print("    已完成：003 砍 grpc-gRPC（-2.04 MiB）；004 砍 wireguard+gvisor / QUIC / DoQ")
     return 0
 
 
