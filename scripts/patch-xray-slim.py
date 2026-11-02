@@ -1,177 +1,165 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-给 helloworld 的 xray-core 加一个 Build/Prepare 覆盖，在源码解压之后做两件事：
+xray-core 体积精简 v3 —— 改用 OpenWrt 标准 patches 机制（不再覆盖 Build/Prepare）
 
-【A】删掉 main/distro/all/all.go 里用不到的空导入
-     xray 用 `_ "github.com/xtls/xray-core/..."` 做编译期注册。Go 只链接被引用的包，
-     删掉这些空导入后，对应实现及其第三方依赖就完全不参与编译。
+【为什么 v1/v2 无效】
+v1/v2 往 xray-core/Makefile 里注入 `define Build/Prepare`，实测两轮 CI 产出的
+xray 二进制 md5 完全一致（23,713,500 B），grpc / commander / quic-go 全都还在。
+说明注入的 Build/Prepare 根本没被执行 —— 覆盖这个 hook 在 OpenWrt 里不可靠。
 
-【B】摘掉 CLI 的 api 子命令，真正切断 gRPC 依赖链
-     v1 只删了 transport/internet/grpc（传输层），但下面这些包全都
-     `import "google.golang.org/grpc"`：
-         app/commander             （API 服务宿主）
-         app/log/command           （LoggerService）
-         app/proxyman/command      （HandlerService）
-         app/stats/command         （StatsService）
-     而 main/commands/all 又 import main/commands/all/api，
-     api 再把这四个包拉一遍 —— 所以 v1 的 grpc 实际白删。
-     v2 必须同时改 main/commands/all/commands.go，删掉 api 的 import 和 api.CmdAPI。
+v3 改走官方机制：把改动做成 unified diff 放进包的 `patches/` 目录。
+`include/package-defaults.mk` 里
+    Build/Patch:=$(Build/Patch/Default)
+    PATCH_DIR?=./patches
+    define Build/Prepare/Default
+        $(PKG_UNPACK)
+        $(Build/Patch)
+    endef
+即 Prepare 阶段会**无条件**按 `PATCH_DIR` 应用补丁，不存在被覆盖的可能。
 
-     安全性已核实：luci-app-ssr-plus 187-2 的
-     root/usr/share/shadowsocksr/gen_config.lua 生成的 Xray 配置里，
-     `api` / `stats` / `policy` 出现 0 次，只有 log / inbounds / outbounds / routing；
-     init.d 与 control.lua 也没有 `xray api` 调用。
-     → 删掉 commander 链后 ssr-plus 照常启动，不存在「配置里有 api 段却无 app 注册」的风险。
+【补丁内容】
+001-slim-modules.patch
+    删 main/distro/all/all.go 里 12 个空导入（协议/传输层）。
+    xray 用 `_ "github.com/xtls/xray-core/..."` 做编译期注册，Go 只链接被引用的包，
+    删掉后对应实现及其第三方依赖（quic-go 等）完全不参与编译。
 
-删掉的模块清单：
-  A 组（协议/传输，本机型用不到）
-    transport/internet/quic          -> quic-go
-    transport/internet/grpc          -> gRPC 传输层
-    transport/internet/kcp           -> mkcp
-    transport/internet/domainsocket  -> unix socket
-    proxy/wireguard, proxy/loopback, app/reverse, app/metrics
-    app/observatory(+command), main/toml, main/yaml
-  B 组（gRPC API 链，本次新增）
-    app/commander, app/log/command, app/proxyman/command, app/stats/command
+002-drop-grpc-api.patch
+    删 all.go 里 4 个 gRPC API 模块 + 改 main/commands/all/commands.go，
+    去掉 `api` 的 import 与 `api.CmdAPI`，真正切断 google.golang.org/grpc。
+    原因：app/commander、app/log/command、app/proxyman/command、app/stats/command
+    全都 import grpc，而 main/commands/all 又 import main/commands/all/api，
+    api 再把这四个包拉一遍 —— 只删 transport/internet/grpc（传输层）等于白删。
 
-保留：vless(in/out) + reality + tls + tcp + udp + websocket + http + vmess +
-shadowsocks + trojan + socks + dokodemo + freedom + blackhole + dns +
-dispatcher/proxyman/router/stats/policy/log。
-→ vless+reality 完整可用；SS/SSR 走 shadowsocks-libev 独立二进制，不受影响。
+    安全性已核实：luci-app-ssr-plus 187-2 的 gen_config.lua 生成的 Xray 配置里
+    `api` / `stats` / `policy` 出现 0 次，只有 log / inbounds / outbounds / routing；
+    init.d 与 control.lua 也没有 `xray api` 调用 → 删掉后 ssr-plus 照常启动。
+
+【保留】
+vless(in/out) + reality + tls + tcp + udp + websocket + http + vmess + shadowsocks +
+trojan + socks + dokodemo + freedom + blackhole + dns + dispatcher/proxyman/router/
+stats/policy/log。vless+reality 完整可用；SS/SSR 走 shadowsocks-libev 独立二进制。
 
 用法：
-  python3 patch-xray-slim.py package/helloworld/xray-core/Makefile
+  python3 patch-xray-slim.py package/helloworld/xray-core
+  python3 patch-xray-slim.py package/helloworld/xray-core/Makefile   # 兼容旧调用
 
-幂等：Makefile 里已有 XRAY_SLIM_VERSION := 2 就直接跳过。
+幂等：补丁文件内容一致则跳过；若检测到 v1/v2 注入的 Build/Prepare 残留会自动清除。
 """
 
-import sys
 import os
+import shutil
+import sys
 
-VERSION_MARK = "XRAY_SLIM_VERSION := 2"
-LEGACY_MARK = "XRAY_SLIM_MODULES"
-
-# A 组：协议 / 传输
-DROP_TRANSPORT = [
-    "transport/internet/quic",
-    "transport/internet/grpc",
-    "transport/internet/kcp",
-    "transport/internet/domainsocket",
-    "proxy/wireguard",
-    "proxy/loopback",
-    "app/reverse",
-    "app/metrics",
-    "app/observatory",
-    "app/observatory/command",
-    "main/toml",
-    "main/yaml",
+PATCH_NAMES = [
+    "001-slim-modules.patch",
+    "002-drop-grpc-api.patch",
 ]
 
-# B 组：gRPC API 链（删完这组，google.golang.org/grpc 才真正退出编译）
-DROP_GRPC_API = [
-    "app/commander",
-    "app/log/command",
-    "app/proxyman/command",
-    "app/stats/command",
+# v1/v2 注入块的起始标记（需清理掉，否则 Build/Prepare 覆盖会干扰判断）
+LEGACY_MARKS = [
+    "# ---- xray 体积精简 v2",
+    "XRAY_SLIM_MODULES :=",
 ]
 
-DROP = DROP_TRANSPORT + DROP_GRPC_API
 
-BLOCK = """# ---- xray 体积精简 v2（scripts/patch-xray-slim.py 注入，勿手改）----
-# A 组：删 all.go 空导入 => 对应包不参与编译，顺带甩掉 quic-go 等第三方依赖
-# B 组：删 commander 及三个 */command => 切断 google.golang.org/grpc
-#       同时改 main/commands/all/commands.go，摘掉 CLI 的 api 子命令
-XRAY_SLIM_VERSION := 2
-XRAY_SLIM_MODULES := \\
-%s
+def strip_legacy_block(mk_path):
+    """删掉 v1/v2 注入的注释块 + define Build/Prepare ... endef。返回是否改动。"""
+    if not os.path.isfile(mk_path):
+        return False
+    with open(mk_path, "r", encoding="utf-8", errors="surrogateescape", newline="") as f:
+        raw = f.read()
+    crlf = "\r\n" in raw
+    lines = raw.replace("\r\n", "\n").split("\n")
 
-define Build/Prepare
-\t$(call Build/Prepare/Default)
-\t@echo "==> xray 精简 v2：从 all.go 剔除 $(words $(XRAY_SLIM_MODULES)) 个模块"
-\t@for m in $(XRAY_SLIM_MODULES); do \\
-\t\tsed -i "\\|github.com/xtls/xray-core/$$m\\"|d" $(PKG_BUILD_DIR)/main/distro/all/all.go || exit 1; \\
-\tdone
-\t@n=$$(grep -c '^[[:space:]]*_ "' $(PKG_BUILD_DIR)/main/distro/all/all.go || true); \\
-\t\techo "==> all.go 剩余注册行: $$n（原始 54 行）"
-\t@C=$(PKG_BUILD_DIR)/main/commands/all/commands.go; \\
-\tif [ -f "$$C" ]; then \\
-\t\tsed -i '\\|github.com/xtls/xray-core/main/commands/all/api"|d' $$C || exit 1; \\
-\t\tsed -i '/^[[:space:]]*api\\.CmdAPI,/d' $$C || exit 1; \\
-\t\tif grep -q 'CmdAPI' $$C; then \\
-\t\t\techo "!! 错误：api.CmdAPI 未完全移除，grpc 仍会被链接" >&2; exit 1; \\
-\t\tfi; \\
-\t\techo "==> 已摘除 CLI 的 api 子命令（切断 gRPC 依赖链）"; \\
-\telse \\
-\t\techo "!! 警告：找不到 main/commands/all/commands.go，gRPC 可能仍在" >&2; \\
-\tfi
-\t@echo "==> 残留 grpc 引用自检（应为空）："; \\
-\tgrep -rl 'google.golang.org/grpc' $(PKG_BUILD_DIR)/app $(PKG_BUILD_DIR)/main 2>/dev/null | head -5 || true
-endef
-"""
+    start = -1
+    for i, ln in enumerate(lines):
+        if any(m in ln for m in LEGACY_MARKS):
+            start = i
+            break
+    if start < 0:
+        return False
 
+    # 往回吃掉紧邻的注释行与空行（v2 注入时块前总带一个空行）
+    while start > 0 and (lines[start - 1].lstrip().startswith("#") or not lines[start - 1].strip()):
+        start -= 1
 
-def build_block():
-    mods = " \\\n".join("\t" + m for m in DROP)
-    return BLOCK % mods
+    end = -1
+    for j in range(start, len(lines)):
+        if lines[j].strip() == "endef":
+            end = j
+            break
+        # 没有 endef 就退到 XRAY_SLIM_MODULES 连续块结束
+    if end < 0:
+        end = start
+        while end + 1 < len(lines) and lines[end + 1].strip().startswith(("\t", "XRAY_SLIM")):
+            end += 1
+
+    removed = end - start + 1
+    del lines[start:end + 1]
+    # 块尾部自带的空行也一并收掉
+    if start < len(lines) and not lines[start].strip():
+        del lines[start]
+
+    out = "\n".join(lines)
+    while "\n\n\n" in out:
+        out = out.replace("\n\n\n", "\n\n")
+    if crlf:
+        out = out.replace("\n", "\r\n")
+    with open(mk_path, "w", encoding="utf-8", errors="surrogateescape", newline="") as f:
+        f.write(out)
+    print("==> 已清除 v1/v2 残留的 Build/Prepare 注入块（%d 行）" % removed)
+    return True
 
 
 def main():
     if len(sys.argv) < 2:
-        print("用法: patch-xray-slim.py <xray-core Makefile 路径>", file=sys.stderr)
+        print("用法: patch-xray-slim.py <xray-core 包目录或 Makefile 路径>", file=sys.stderr)
         return 2
 
-    path = sys.argv[1]
-    if not os.path.isfile(path):
-        print("!! 错误：找不到 %s" % path, file=sys.stderr)
-        return 2
-
-    with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
-        src = f.read()
-
-    if VERSION_MARK in src:
-        print("==> xray 精简 v2 补丁已存在，跳过（幂等）")
-        return 0
-
-    if LEGACY_MARK in src:
-        print("!! 错误：检测到 v1 精简补丁（只删传输层 grpc，无效）。"
-              "请重新拉取干净的 helloworld 源码后再打 v2。", file=sys.stderr)
-        return 1
-
-    # 插在 include $(INCLUDE_DIR)/package.mk 之后：package.mk 定义了
-    # Build/Prepare/Default，而 golang-package.mk 只覆盖 Build/Compile，
-    # 所以在此处定义 Build/Prepare 不会冲掉 Go 的构建逻辑。
-    anchor = "include $(INCLUDE_DIR)/package.mk"
-    idx = src.find(anchor)
-    if idx < 0:
-        anchor = "define Package/xray-core"
-        idx = src.find(anchor)
-        if idx < 0:
-            print("!! 错误：Makefile 里找不到插入锚点（package.mk include / Package/xray-core）",
-                  file=sys.stderr)
-            return 1
-        insert_at = idx
-        print("==> 警告：未找到 package.mk include，改为插在 define Package/xray-core 之前")
+    target = sys.argv[1]
+    if target.endswith("Makefile"):
+        pkg_dir = os.path.dirname(target) or "."
     else:
-        insert_at = idx + len(anchor)
-        nl = src.find("\n", insert_at)
-        insert_at = (nl + 1) if nl >= 0 else len(src)
+        pkg_dir = target
 
-    block = "\n" + build_block() + "\n"
-    out = src[:insert_at] + block + src[insert_at:]
+    if not os.path.isdir(pkg_dir):
+        print("!! 错误：找不到包目录 %s" % pkg_dir, file=sys.stderr)
+        return 2
 
-    with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
-        f.write(out)
+    here = os.path.dirname(os.path.abspath(__file__))
+    src_dir = os.path.join(here, "xray-patches")
+    if not os.path.isdir(src_dir):
+        print("!! 错误：找不到补丁源目录 %s" % src_dir, file=sys.stderr)
+        return 2
 
-    print("==> 已注入 xray 精简 v2 Build/Prepare（共 %d 个模块）" % len(DROP))
-    print("    [A 组 协议/传输] %d 个" % len(DROP_TRANSPORT))
-    for m in DROP_TRANSPORT:
-        print("       - %s" % m)
-    print("    [B 组 gRPC API 链] %d 个" % len(DROP_GRPC_API))
-    for m in DROP_GRPC_API:
-        print("       - %s" % m)
-    print("    + 摘除 commands.go 里的 api 子命令")
-    print("==> Makefile: %s (%d 行)" % (path, out.count("\n")))
+    dst_dir = os.path.join(pkg_dir, "patches")
+    os.makedirs(dst_dir, exist_ok=True)
+
+    changed = 0
+    for name in PATCH_NAMES:
+        src = os.path.join(src_dir, name)
+        dst = os.path.join(dst_dir, name)
+        if not os.path.isfile(src):
+            print("!! 错误：缺少补丁 %s" % src, file=sys.stderr)
+            return 1
+        with open(src, "rb") as f:
+            data = f.read()
+        if os.path.isfile(dst):
+            with open(dst, "rb") as f:
+                if f.read() == data:
+                    print("    %-28s 已存在且一致，跳过" % name)
+                    continue
+        shutil.copyfile(src, dst)
+        changed += 1
+        hunks = data.count(b"\n@@ ") + data.count(b"@@ -") - data.count(b"\n@@ ")
+        print("    %-28s 已写入（%d B）" % (name, len(data)))
+
+    strip_legacy_block(os.path.join(pkg_dir, "Makefile"))
+
+    print("==> xray 精简 v3 就绪：补丁位于 %s" % dst_dir)
+    print("    Prepare 阶段由 Build/Patch 自动应用（PATCH_DIR=./patches），无需改 Makefile")
+    print("    预期：all.go 注册行 54 -> 38，google.golang.org/grpc 退出编译")
     return 0
 
 

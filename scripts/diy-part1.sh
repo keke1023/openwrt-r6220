@@ -114,26 +114,36 @@ fi
 # ---------------------------------------------------------------------------
 # xray 二进制精简（本轮只对萤石 W3 原厂 16MB 试跑）
 # ---------------------------------------------------------------------------
-# 给 xray-core 注入 Build/Prepare 覆盖，在源码解压后删掉 main/distro/all/all.go
-# 里 12 个可选模块的空导入：
-#   quic / grpc / kcp / domainsocket / wireguard / loopback / reverse /
-#   metrics / observatory(+command) / toml / yaml
-# 对应第三方依赖（quic-go、google.golang.org/grpc、protobuf）完全不参与编译，
-# 是 16MB flash 上最肥的一块。保留 vless(in/outbound) + reality + tls + tcp +
-# websocket + http + vmess + shadowsocks + trojan + socks + dokodemo + freedom，
+# v3 改用 OpenWrt 标准 patches 机制：把 2 个 unified diff 放进
+# package/helloworld/xray-core/patches/，由 Build/Patch（PATCH_DIR=./patches）
+# 在 Prepare 阶段无条件应用。
+#
+#   001-slim-modules.patch  删 all.go 里 12 个空导入（quic/grpc传输层/kcp/
+#                           domainsocket/wireguard/loopback/reverse/metrics/
+#                           observatory(+command)/toml/yaml）
+#   002-drop-grpc-api.patch 删 all.go 里 4 个 gRPC API 模块 + 摘掉 CLI 的
+#                           api 子命令，真正切断 google.golang.org/grpc
+#
+# 为什么不覆盖 Build/Prepare：v1/v2 两轮 CI 产出的 xray 二进制 md5 完全相同
+# （23,713,500 B），grpc / commander / quic-go 全在，证明那个 hook 压根没被执行。
+#
+# 保留 vless(in/outbound) + reality + tls + tcp + udp + websocket + http +
+# vmess + shadowsocks + trojan + socks + dokodemo + freedom，
 # vless+reality 完整可用；SS/SSR 走 shadowsocks-libev 独立二进制，不受影响。
-# 实测：all.go 注册行 54 -> 42，19 项关键能力逐条核对无缺失。
+# 预期：all.go 注册行 54 -> 38。
 #
 # 门控说明：这里刻意**不**跟 PINNED 走 —— PINNED 还包含 k2p / a3004ns-dual，
 # 一起改等于一次动三台，出问题不好定位。先只让萤石 W3 试跑，验证通过后
 # 把下面的条件换成 [ -n "${PINNED:-}" ]，即可推广到全部小闪存机型。
 if echo "${TARGET_CONFIG:-}" | grep -qE '^ezviz_cs-w3-wd1200g\.config$'; then
   XRAY_SLIM_PY="../scripts/patch-xray-slim.py"
-  XRAY_SLIM_MK="package/helloworld/xray-core/Makefile"
-  if [ -f "$XRAY_SLIM_PY" ] && [ -f "$XRAY_SLIM_MK" ]; then
-    python3 "$XRAY_SLIM_PY" "$XRAY_SLIM_MK" || { echo "!! 错误：xray 精简注入失败"; exit 1; }
+  XRAY_SLIM_PKG="package/helloworld/xray-core"
+  if [ -f "$XRAY_SLIM_PY" ] && [ -d "$XRAY_SLIM_PKG" ]; then
+    python3 "$XRAY_SLIM_PY" "$XRAY_SLIM_PKG" || { echo "!! 错误：xray 精简补丁落位失败"; exit 1; }
+    echo "==> xray-core/patches 内容："
+    ls -1 "$XRAY_SLIM_PKG/patches" | sed 's/^/       /'
   else
-    echo "!! 警告：缺少 $XRAY_SLIM_PY 或 $XRAY_SLIM_MK，跳过 xray 精简（固件可能超分区）"
+    echo "!! 警告：缺少 $XRAY_SLIM_PY 或 $XRAY_SLIM_PKG，跳过 xray 精简（固件可能超分区）"
   fi
 fi
 
