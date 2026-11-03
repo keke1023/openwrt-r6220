@@ -116,34 +116,39 @@ if [ -z "${PINNED:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# xray 二进制精简（本轮只对萤石 W3 原厂 16MB 试跑）
+# xray 二进制精简（按版本自动选补丁集；仅小闪存机型 PINNED 生效）
 # ---------------------------------------------------------------------------
-# v3 改用 OpenWrt 标准 patches 机制：把 2 个 unified diff 放进
+# v3 改用 OpenWrt 标准 patches 机制：把 unified diff 放进
 # package/helloworld/xray-core/patches/，由 Build/Patch（PATCH_DIR=./patches）
-# 在 Prepare 阶段无条件应用。
+# 在 Prepare 阶段无条件应用。补丁源按 xray 版本分目录存放（1.8.4 / 1.8.24），
+# 由 patch-xray-slim.py 读 PKG_VERSION 自动选择 —— 两版源码结构不同，
+# 1.8.4 那套直接喂给 1.8.24 会 11 个文件全部 reject（实测）。
 #
-#   001-slim-modules.patch  删 all.go 里 12 个空导入（quic/grpc传输层/kcp/
-#                           domainsocket/wireguard/loopback/reverse/metrics/
-#                           observatory(+command)/toml/yaml）
-#   002-drop-grpc-api.patch 删 all.go 里 4 个 gRPC API 模块 + 摘掉 CLI 的
-#                           api 子命令
-#   003-drop-tls-grpc.patch 掏空 transport/internet/tls/grpc.go
-#                           ★ 关键：tls 包为 reality 必须保留，但它自己 import grpc
-#                           （NewGrpcUtls），只跑 001+002 时 grpc 仍会被链接，
-#                           实测只省 37 KB。掏空该文件后 grpc 才真正退出编译。
+#   1.8.4（萤石 W3，原厂 16MB）4 个补丁：
+#     001 删 all.go 12 个空导入
+#     002 删 all.go 4 个 gRPC API 模块 + CLI 的 api 子命令
+#     003 grpc 全链：掏空 tls/grpc.go（★ tls 为 reality 必须保留，但它自己
+#         import grpc 的 NewGrpcUtls，不掏空它 grpc 永远退不出去，实测只省 37 KB）
+#         + 掏空 conf/{grpc,api}.go（★ conf 的 api 段 import commander，这才是
+#         grpc-go 常驻的真因）+ 删 TransportConfig/StreamConfig/xray.go 字段与 Build
+#     004 wireguard/gvisor（gvisor 全仓只被 proxy/wireguard 引用）+ QUIC 传输
+#         + DoQ + QUIC 嗅探
 #
-# 为什么不覆盖 Build/Prepare：v1/v2 两轮 CI 产出的 xray 二进制 md5 完全相同
+#   1.8.24（K2P / WR1200JS / a3004ns-dual）5 个补丁：结构同上，但
+#     005 必须额外砍掉 splithttp —— 它自带 HTTP/3（quic-go/http3），是
+#     quic-go 的第四个入口，不砍它 quic-go 会从这条路重新被链进来。
+#
+# 为什么不再覆盖 Build/Prepare：v1/v2 两轮 CI 产出的 xray 二进制 md5 完全相同
 # （23,713,500 B），grpc / commander / quic-go 全在，证明那个 hook 压根没被执行。
 #
 # 保留 vless(in/outbound) + reality + tls + tcp + udp + websocket + http +
-# vmess + shadowsocks + trojan + socks + dokodemo + freedom，
-# vless+reality 完整可用；SS/SSR 走 shadowsocks-libev 独立二进制，不受影响。
-# 预期：all.go 注册行 54 -> 38。
+# httpupgrade + vmess + shadowsocks + trojan + socks + dokodemo + freedom，
+# vless+reality+vision 完整可用；SS/SSR 走 shadowsocks-libev 独立二进制。
 #
-# 门控说明：这里刻意**不**跟 PINNED 走 —— PINNED 还包含 k2p / a3004ns-dual，
-# 一起改等于一次动三台，出问题不好定位。先只让萤石 W3 试跑，验证通过后
-# 把下面的条件换成 [ -n "${PINNED:-}" ]，即可推广到全部小闪存机型。
-if echo "${TARGET_CONFIG:-}" | grep -qE '^ezviz_cs-w3-wd1200g\.config$'; then
+# 门控：只在 PINNED（小闪存机型）生效。萤石 16MB 已实测可启动且
+# vless+reality+vision 正常工作（overlay 1216 KiB）；K2P / WR1200JS 走 1.8.24 那套。
+# 32MB 改造机型（phicomm_k2-32m / ezviz *-32m）不在 PINNED 里，不精简。
+if [ -n "${PINNED:-}" ]; then
   XRAY_SLIM_PY="../scripts/patch-xray-slim.py"
   XRAY_SLIM_PKG="package/helloworld/xray-core"
   if [ -f "$XRAY_SLIM_PY" ] && [ -d "$XRAY_SLIM_PKG" ]; then
