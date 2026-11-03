@@ -1,0 +1,317 @@
+diff --git a/infra/conf/api.go b/infra/conf/api.go
+index dca3491..8f52a95 100644
+--- a/infra/conf/api.go
++++ b/infra/conf/api.go
+@@ -1,50 +1 @@
+ package conf
+-
+-import (
+-	"strings"
+-
+-	"github.com/xtls/xray-core/app/commander"
+-	loggerservice "github.com/xtls/xray-core/app/log/command"
+-	observatoryservice "github.com/xtls/xray-core/app/observatory/command"
+-	handlerservice "github.com/xtls/xray-core/app/proxyman/command"
+-	routerservice "github.com/xtls/xray-core/app/router/command"
+-	statsservice "github.com/xtls/xray-core/app/stats/command"
+-	"github.com/xtls/xray-core/common/errors"
+-	"github.com/xtls/xray-core/common/serial"
+-)
+-
+-type APIConfig struct {
+-	Tag      string   `json:"tag"`
+-	Listen   string   `json:"listen"`
+-	Services []string `json:"services"`
+-}
+-
+-func (c *APIConfig) Build() (*commander.Config, error) {
+-	if c.Tag == "" {
+-		return nil, errors.New("API tag can't be empty.")
+-	}
+-
+-	services := make([]*serial.TypedMessage, 0, 16)
+-	for _, s := range c.Services {
+-		switch strings.ToLower(s) {
+-		case "reflectionservice":
+-			services = append(services, serial.ToTypedMessage(&commander.ReflectionConfig{}))
+-		case "handlerservice":
+-			services = append(services, serial.ToTypedMessage(&handlerservice.Config{}))
+-		case "loggerservice":
+-			services = append(services, serial.ToTypedMessage(&loggerservice.Config{}))
+-		case "statsservice":
+-			services = append(services, serial.ToTypedMessage(&statsservice.Config{}))
+-		case "observatoryservice":
+-			services = append(services, serial.ToTypedMessage(&observatoryservice.Config{}))
+-		case "routingservice":
+-			services = append(services, serial.ToTypedMessage(&routerservice.Config{}))
+-		}
+-	}
+-
+-	return &commander.Config{
+-		Tag:     c.Tag,
+-		Listen:  c.Listen,
+-		Service: services,
+-	}, nil
+-}
+diff --git a/infra/conf/grpc.go b/infra/conf/grpc.go
+index 429186b..8f52a95 100644
+--- a/infra/conf/grpc.go
++++ b/infra/conf/grpc.go
+@@ -1,41 +1 @@
+ package conf
+-
+-import (
+-	"github.com/xtls/xray-core/transport/internet/grpc"
+-	"google.golang.org/protobuf/proto"
+-)
+-
+-type GRPCConfig struct {
+-	Authority           string `json:"authority"`
+-	ServiceName         string `json:"serviceName"`
+-	MultiMode           bool   `json:"multiMode"`
+-	IdleTimeout         int32  `json:"idle_timeout"`
+-	HealthCheckTimeout  int32  `json:"health_check_timeout"`
+-	PermitWithoutStream bool   `json:"permit_without_stream"`
+-	InitialWindowsSize  int32  `json:"initial_windows_size"`
+-	UserAgent           string `json:"user_agent"`
+-}
+-
+-func (g *GRPCConfig) Build() (proto.Message, error) {
+-	if g.IdleTimeout <= 0 {
+-		g.IdleTimeout = 0
+-	}
+-	if g.HealthCheckTimeout <= 0 {
+-		g.HealthCheckTimeout = 0
+-	}
+-	if g.InitialWindowsSize < 0 {
+-		// default window size of gRPC-go
+-		g.InitialWindowsSize = 0
+-	}
+-
+-	return &grpc.Config{
+-		Authority:           g.Authority,
+-		ServiceName:         g.ServiceName,
+-		MultiMode:           g.MultiMode,
+-		IdleTimeout:         g.IdleTimeout,
+-		HealthCheckTimeout:  g.HealthCheckTimeout,
+-		PermitWithoutStream: g.PermitWithoutStream,
+-		InitialWindowsSize:  g.InitialWindowsSize,
+-		UserAgent:           g.UserAgent,
+-	}, nil
+-}
+diff --git a/infra/conf/transport.go b/infra/conf/transport.go
+index b401dca..51f9711 100644
+--- a/infra/conf/transport.go
++++ b/infra/conf/transport.go
+@@ -14,8 +14,6 @@ type TransportConfig struct {
+ 	HTTPConfig        *HTTPConfig         `json:"httpSettings"`
+ 	DSConfig          *DomainSocketConfig `json:"dsSettings"`
+ 	QUICConfig        *QUICConfig         `json:"quicSettings"`
+-	GRPCConfig        *GRPCConfig         `json:"grpcSettings"`
+-	GUNConfig         *GRPCConfig         `json:"gunSettings"`
+ 	HTTPUPGRADEConfig *HttpUpgradeConfig  `json:"httpupgradeSettings"`
+ 	SplitHTTPConfig   *SplitHTTPConfig    `json:"splithttpSettings"`
+ }
+@@ -90,20 +88,6 @@ func (c *TransportConfig) Build() (*global.Config, error) {
+ 		})
+ 	}
+ 
+-	if c.GRPCConfig == nil {
+-		c.GRPCConfig = c.GUNConfig
+-	}
+-	if c.GRPCConfig != nil {
+-		gs, err := c.GRPCConfig.Build()
+-		if err != nil {
+-			return nil, errors.New("Failed to build gRPC config.").Base(err)
+-		}
+-		config.TransportSettings = append(config.TransportSettings, &internet.TransportConfig{
+-			ProtocolName: "grpc",
+-			Settings:     serial.ToTypedMessage(gs),
+-		})
+-	}
+-
+ 	if c.HTTPUPGRADEConfig != nil {
+ 		hs, err := c.HTTPUPGRADEConfig.Build()
+ 		if err != nil {
+diff --git a/infra/conf/transport_internet.go b/infra/conf/transport_internet.go
+index 9e13f24..c8b1a98 100644
+--- a/infra/conf/transport_internet.go
++++ b/infra/conf/transport_internet.go
+@@ -831,8 +831,6 @@ type StreamConfig struct {
+ 	DSSettings          *DomainSocketConfig `json:"dsSettings"`
+ 	QUICSettings        *QUICConfig         `json:"quicSettings"`
+ 	SocketSettings      *SocketConfig       `json:"sockopt"`
+-	GRPCConfig          *GRPCConfig         `json:"grpcSettings"`
+-	GUNConfig           *GRPCConfig         `json:"gunSettings"`
+ 	HTTPUPGRADESettings *HttpUpgradeConfig  `json:"httpupgradeSettings"`
+ 	SplitHTTPSettings   *SplitHTTPConfig    `json:"splithttpSettings"`
+ }
+@@ -942,19 +940,6 @@ func (c *StreamConfig) Build() (*internet.StreamConfig, error) {
+ 			Settings:     serial.ToTypedMessage(qs),
+ 		})
+ 	}
+-	if c.GRPCConfig == nil {
+-		c.GRPCConfig = c.GUNConfig
+-	}
+-	if c.GRPCConfig != nil {
+-		gs, err := c.GRPCConfig.Build()
+-		if err != nil {
+-			return nil, errors.New("Failed to build gRPC config.").Base(err)
+-		}
+-		config.TransportSettings = append(config.TransportSettings, &internet.TransportConfig{
+-			ProtocolName: "grpc",
+-			Settings:     serial.ToTypedMessage(gs),
+-		})
+-	}
+ 	if c.HTTPUPGRADESettings != nil {
+ 		hs, err := c.HTTPUPGRADESettings.Build()
+ 		if err != nil {
+diff --git a/infra/conf/xray.go b/infra/conf/xray.go
+index 29616ef..a5a4cd5 100644
+--- a/infra/conf/xray.go
++++ b/infra/conf/xray.go
+@@ -412,7 +412,6 @@ type Config struct {
+ 	OutboundConfigs  []OutboundDetourConfig  `json:"outbounds"`
+ 	Transport        *TransportConfig        `json:"transport"`
+ 	Policy           *PolicyConfig           `json:"policy"`
+-	API              *APIConfig              `json:"api"`
+ 	Metrics          *MetricsConfig          `json:"metrics"`
+ 	Stats            *StatsConfig            `json:"stats"`
+ 	Reverse          *ReverseConfig          `json:"reverse"`
+@@ -462,9 +461,6 @@ func (c *Config) Override(o *Config, fn string) {
+ 	if o.Policy != nil {
+ 		c.Policy = o.Policy
+ 	}
+-	if o.API != nil {
+-		c.API = o.API
+-	}
+ 	if o.Metrics != nil {
+ 		c.Metrics = o.Metrics
+ 	}
+@@ -578,13 +574,6 @@ func (c *Config) Build() (*core.Config, error) {
+ 		},
+ 	}
+ 
+-	if c.API != nil {
+-		apiConf, err := c.API.Build()
+-		if err != nil {
+-			return nil, err
+-		}
+-		config.App = append(config.App, serial.ToTypedMessage(apiConf))
+-	}
+ 	if c.Metrics != nil {
+ 		metricsConf, err := c.Metrics.Build()
+ 		if err != nil {
+diff --git a/transport/internet/tls/grpc.go b/transport/internet/tls/grpc.go
+index 6e5dc57..bf8418c 100644
+--- a/transport/internet/tls/grpc.go
++++ b/transport/internet/tls/grpc.go
+@@ -1,108 +1 @@
+ package tls
+-
+-import (
+-	"context"
+-	gotls "crypto/tls"
+-	"net"
+-	"net/url"
+-	"strconv"
+-
+-	utls "github.com/refraction-networking/utls"
+-	"google.golang.org/grpc/credentials"
+-)
+-
+-// grpcUtlsInfo contains the auth information for a TLS authenticated connection.
+-// It implements the AuthInfo interface.
+-type grpcUtlsInfo struct {
+-	State utls.ConnectionState
+-	credentials.CommonAuthInfo
+-	// This API is experimental.
+-	SPIFFEID *url.URL
+-}
+-
+-// AuthType returns the type of TLSInfo as a string.
+-func (t grpcUtlsInfo) AuthType() string {
+-	return "utls"
+-}
+-
+-// GetSecurityValue returns security info requested by channelz.
+-func (t grpcUtlsInfo) GetSecurityValue() credentials.ChannelzSecurityValue {
+-	v := &credentials.TLSChannelzSecurityValue{
+-		StandardName: "0x" + strconv.FormatUint(uint64(t.State.CipherSuite), 16),
+-	}
+-	// Currently there's no way to get LocalCertificate info from tls package.
+-	if len(t.State.PeerCertificates) > 0 {
+-		v.RemoteCertificate = t.State.PeerCertificates[0].Raw
+-	}
+-	return v
+-}
+-
+-// grpcUtls is the credentials required for authenticating a connection using TLS.
+-type grpcUtls struct {
+-	config      *gotls.Config
+-	fingerprint *utls.ClientHelloID
+-}
+-
+-func (c grpcUtls) Info() credentials.ProtocolInfo {
+-	return credentials.ProtocolInfo{
+-		SecurityProtocol: "tls",
+-		SecurityVersion:  "1.2",
+-		ServerName:       c.config.ServerName,
+-	}
+-}
+-
+-func (c *grpcUtls) ClientHandshake(ctx context.Context, authority string, rawConn net.Conn) (_ net.Conn, _ credentials.AuthInfo, err error) {
+-	// use local cfg to avoid clobbering ServerName if using multiple endpoints
+-	cfg := c.config.Clone()
+-	if cfg.ServerName == "" {
+-		serverName, _, err := net.SplitHostPort(authority)
+-		if err != nil {
+-			// If the authority had no host port or if the authority cannot be parsed, use it as-is.
+-			serverName = authority
+-		}
+-		cfg.ServerName = serverName
+-	}
+-	conn := UClient(rawConn, cfg, c.fingerprint).(*UConn)
+-	errChannel := make(chan error, 1)
+-	go func() {
+-		errChannel <- conn.HandshakeContext(ctx)
+-		close(errChannel)
+-	}()
+-	select {
+-	case err := <-errChannel:
+-		if err != nil {
+-			conn.Close()
+-			return nil, nil, err
+-		}
+-	case <-ctx.Done():
+-		conn.Close()
+-		return nil, nil, ctx.Err()
+-	}
+-	tlsInfo := grpcUtlsInfo{
+-		State: conn.ConnectionState(),
+-		CommonAuthInfo: credentials.CommonAuthInfo{
+-			SecurityLevel: credentials.PrivacyAndIntegrity,
+-		},
+-	}
+-	return conn, tlsInfo, nil
+-}
+-
+-// ServerHandshake will always panic. We don't support running uTLS as server.
+-func (c *grpcUtls) ServerHandshake(net.Conn) (net.Conn, credentials.AuthInfo, error) {
+-	panic("not available!")
+-}
+-
+-func (c *grpcUtls) Clone() credentials.TransportCredentials {
+-	return NewGrpcUtls(c.config, c.fingerprint)
+-}
+-
+-func (c *grpcUtls) OverrideServerName(serverNameOverride string) error {
+-	c.config.ServerName = serverNameOverride
+-	return nil
+-}
+-
+-// NewGrpcUtls uses c to construct a TransportCredentials based on uTLS.
+-func NewGrpcUtls(c *gotls.Config, fingerprint *utls.ClientHelloID) credentials.TransportCredentials {
+-	tc := &grpcUtls{c.Clone(), fingerprint}
+-	return tc
+-}
