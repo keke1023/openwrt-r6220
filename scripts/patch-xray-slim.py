@@ -1,97 +1,107 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-xray-core 体积精简 v3 —— 改用 OpenWrt 标准 patches 机制（不再覆盖 Build/Prepare）
+xray-core 体积精简 —— 按 xray 版本自动选择补丁集
 
-【为什么 v1/v2 无效】
-v1/v2 往 xray-core/Makefile 里注入 `define Build/Prepare`，实测两轮 CI 产出的
-xray 二进制 md5 完全一致（23,713,500 B），grpc / commander / quic-go 全都还在。
-说明注入的 Build/Prepare 根本没被执行 —— 覆盖这个 hook 在 OpenWrt 里不可靠。
+【为什么用 patches 目录，而不是覆盖 Build/Prepare】
+v1/v2 曾往 xray-core/Makefile 里注入 `define Build/Prepare`，实测两轮 CI 产出的
+xray 二进制 md5 完全一致（23,713,500 B），grpc / commander / quic-go 全都还在 ——
+说明注入的 hook 根本没被执行，覆盖这个 hook 在 OpenWrt 里不可靠。
 
 v3 改走官方机制：把改动做成 unified diff 放进包的 `patches/` 目录。
-`include/package-defaults.mk` 里
-    Build/Patch:=$(Build/Patch/Default)
-    PATCH_DIR?=./patches
-    define Build/Prepare/Default
-        $(PKG_UNPACK)
-        $(Build/Patch)
-    endef
-即 Prepare 阶段会**无条件**按 `PATCH_DIR` 应用补丁，不存在被覆盖的可能。
+  include/package-defaults.mk 里
+      Build/Patch:=$(Build/Patch/Default)
+      PATCH_DIR?=./patches
+      define Build/Prepare/Default
+          $(PKG_UNPACK)
+          $(Build/Patch)
+      endef
+Prepare 阶段会**无条件**按 PATCH_DIR 应用，不存在被覆盖的可能。
 
-【补丁内容】
-001-slim-modules.patch
-    删 main/distro/all/all.go 里 12 个空导入（协议/传输层）。
-    xray 用 `_ "github.com/xtls/xray-core/..."` 做编译期注册，Go 只链接被引用的包，
-    删掉后对应实现及其第三方依赖（quic-go 等）完全不参与编译。
+【补丁集：按版本分目录，改动逻辑一致但源码结构不同】
+xray 在 1.8.4 → 1.8.24 之间做过较大重构（新增 splithttp/httpupgrade、conf 层
+拆分了 QUIC/SplitHTTP 配置），同一份 diff 无法通用：实测把 1.8.4 那套补丁直接
+喂给 1.8.24，11 个文件全部 reject。所以按版本各存一套：
 
-002-drop-grpc-api.patch
-    删 all.go 里 4 个 gRPC API 模块 + 改 main/commands/all/commands.go，
-    去掉 `api` 的 import 与 `api.CmdAPI`，切断 CLI 侧的 grpc 引用链。
-    原因：app/commander、app/log/command、app/proxyman/command、app/stats/command
-    全都 import grpc，而 main/commands/all 又 import main/commands/all/api，
-    api 再把这四个包拉一遍 —— 只删 transport/internet/grpc（传输层）等于白删。
+  xray-patches/1.8.4/   萤石 W3（原厂 16MB）在用，4 个补丁
+    001 删 all.go 12 个空导入
+    002 删 all.go 4 个 gRPC API 模块 + CLI 的 api 子命令
+    003 grpc 全链（tls/grpc.go + conf/{grpc,api}.go + 字段与 Build 分支）
+    004 wireguard/gvisor + QUIC 传输 + DoQ + QUIC 嗅探
+    实测：xray 23,713,500 -> 21,537,356（003），再加 004 后 squashfs
+          11.010 -> 9.309 MiB，overlay 149.7 KiB -> 约 1.6 MiB
 
-    安全性已核实：luci-app-ssr-plus 187-2 的 gen_config.lua 生成的 Xray 配置里
-    `api` / `stats` / `policy` 出现 0 次，只有 log / inbounds / outbounds / routing；
-    init.d 与 control.lua 也没有 `xray api` 调用 → 删掉后 ssr-plus 照常启动。
+  xray-patches/1.8.24/  K2P / WR1200JS / a3004ns-dual 在用，5 个补丁
+    001 删 all.go 13 个空导入（比 1.8.4 多一个 splithttp）
+    002 删 commander + 4 个 gRPC API 服务（all.go）+ CLI 的 api 子命令
+        ★ 只删 CLI 不够：conf 的 api 段仍会 import commander，grpc-go 照样链接
+    003 grpc 全链（同上，6 个文件）
+    004 wireguard 出站（conf/wireguard.go + xray.go 协议表两行）
+    005 QUIC 传输 + DoQ + QUIC 嗅探 + splithttp/HTTP3
+        ★ 1.8.24 新增的 splithttp 自带 HTTP/3（quic-go/http3），是 quic-go 的
+          第四个入口；不砍它，quic-go 会从这条路重新被链进来
+    预期：与 1.8.4 那套同构，xray 未压缩约 -29%
 
-003-drop-tls-grpc.patch
-    切断 grpc 全链（6 个文件，230 行）：
-      1) transport/internet/tls/grpc.go 掏空 —— tls 包自己 import grpc/credentials
-         （NewGrpcUtls），而 tls 为 reality 必须保留，这是 v3 首轮只省 37 KB 的元凶；
-      2) infra/conf/grpc.go 掏空 —— 切断 conf -> transport/internet/grpc 传输层；
-      3) infra/conf/api.go 掏空 —— 切断 conf -> app/commander + 5 个 command 服务。
-         ★ 这才是 grpc-go 一直留在二进制里的真正原因：配置解析器 import commander；
-      4) infra/conf/transport.go 删 GRPCConfig/GUNConfig 字段与 Build 分支；
-      5) infra/conf/transport_internet.go 删 StreamConfig 同名字段与 Build 分支；
-      6) infra/conf/xray.go 删 API 字段 + Override 块 + Build 块。
-    实测（run 41458593954）：xray 23,675,652 -> 21,537,356 B（-2.04 MiB），
-    二进制内 google.golang.org/grpc / transport/internet/grpc 命中数均为 0，
-    vless 217 次、realitySettings 2 次、transport/internet/tls 193 次，功能基石完好。
-    安全性：ssr-plus gen_config.lua 不生成 api 段，init.d 无 `xray api` 调用；
-    配置若残留 "api" 字段会被 json 静默忽略。
-
-004-drop-wireguard-quic.patch
-    再砍三块（2026-11-03，7 个文件 585 行）：
-      1) wireguard outbound：掏空 infra/conf/wireguard.go + 删 xray.go 的
-         "wireguard" 注册行 -> 带走 proxy/wireguard -> 带走整条 gvisor netstack
-         （gvisor 全仓只被 proxy/wireguard 引用，是最大的一头）；
-      2) QUIC 传输：删 infra/conf/transport{,_internet}.go 的 QUICConfig 与
-         transport/internet/quic 引用；
-      3) DoQ + QUIC 嗅探：掏空 app/dns/nameserver_quic.go、删 nameserver.go 的
-         quic+local 分支、删 app/dispatcher/sniffer.go 的 quic.SniffQUIC 注册
-         -> quic-go 本体随之退出。
-    影响：vless+reality / vmess / trojan / ss 全不受影响；不使用 QUIC 传输、
-    WireGuard 出站与 DoQ 解析即可。配置若引用这些协议会报 unknown protocol。
-
-【保留】
-vless(in/out) + reality + tls + tcp + udp + websocket + http + vmess + shadowsocks +
-trojan + socks + dokodemo + freedom + blackhole + dns + dispatcher/proxyman/router/
-stats/policy/log。vless+reality 完整可用；SS/SSR 走 shadowsocks-libev 独立二进制。
+【安全性（两套通用）】
+luci-app-ssr-plus 的 gen_config.lua 生成的 Xray 配置里 `api` / `stats` / `policy`
+出现 0 次，只有 log / inbounds / outbounds / routing；init.d 与 control.lua 也没有
+`xray api` 调用 → 删掉 commander 与 gRPC API 不影响启动。
+vless+reality+vision 走 tcp+tls+reality，全部保留；vmess / trojan / ss / socks /
+ws / h2 / httpupgrade 也保留。SS/SSR 走 shadowsocks-libev 独立二进制，不受影响。
+代价：不支持 QUIC 传输、WireGuard 出站、DoQ 解析、SplitHTTP/HTTP3；
+配置里若写了这些协议，加载时会报 unknown protocol（不会静默降级）。
 
 用法：
   python3 patch-xray-slim.py package/helloworld/xray-core
   python3 patch-xray-slim.py package/helloworld/xray-core/Makefile   # 兼容旧调用
 
-幂等：补丁文件内容一致则跳过；若检测到 v1/v2 注入的 Build/Prepare 残留会自动清除。
+幂等：内容一致则跳过；检测到 v1/v2 注入的 Build/Prepare 残留会自动清除。
+版本不在支持表里时**直接失败**（exit 1），不静默跳过 —— 16MB 机型跳过精简
+等于固件必然超分区，早失败比晚失败好定位。
 """
 
 import os
+import re
 import shutil
 import sys
 
-PATCH_NAMES = [
-    "001-slim-modules.patch",
-    "002-drop-grpc-api.patch",
-    "003-drop-tls-grpc.patch",
-    "004-drop-wireguard-quic.patch",
-]
+# 版本 -> 补丁文件名列表。新增版本时在这里加一条，并在 xray-patches/<版本>/ 放补丁。
+PATCH_SETS = {
+    "1.8.4": [
+        "001-slim-modules.patch",
+        "002-drop-grpc-api.patch",
+        "003-drop-tls-grpc.patch",
+        "004-drop-wireguard-quic.patch",
+    ],
+    "1.8.24": [
+        "001-slim-modules.patch",
+        "002-drop-grpc-api.patch",
+        "003-drop-grpc-chain.patch",
+        "004-drop-wireguard.patch",
+        "005-drop-quic-http3.patch",
+    ],
+}
 
 # v1/v2 注入块的起始标记（需清理掉，否则 Build/Prepare 覆盖会干扰判断）
 LEGACY_MARKS = [
     "# ---- xray 体积精简 v2",
     "XRAY_SLIM_MODULES :=",
 ]
+
+PATCH_NAME_RE = re.compile(r"^\d{3}-[A-Za-z0-9._-]+\.patch$")
+
+
+def read_pkg_version(pkg_dir):
+    """从 xray-core/Makefile 读 PKG_VERSION。"""
+    mk = os.path.join(pkg_dir, "Makefile")
+    if not os.path.isfile(mk):
+        return None
+    with open(mk, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            m = re.match(r"^PKG_VERSION:=\s*(\S+)", line.strip())
+            if m:
+                return m.group(1)
+    return None
 
 
 def strip_legacy_block(mk_path):
@@ -111,7 +121,6 @@ def strip_legacy_block(mk_path):
     if start < 0:
         return False
 
-    # 往回吃掉紧邻的注释行与空行（v2 注入时块前总带一个空行）
     while start > 0 and (lines[start - 1].lstrip().startswith("#") or not lines[start - 1].strip()):
         start -= 1
 
@@ -120,7 +129,6 @@ def strip_legacy_block(mk_path):
         if lines[j].strip() == "endef":
             end = j
             break
-        # 没有 endef 就退到 XRAY_SLIM_MODULES 连续块结束
     if end < 0:
         end = start
         while end + 1 < len(lines) and lines[end + 1].strip().startswith(("\t", "XRAY_SLIM")):
@@ -128,7 +136,6 @@ def strip_legacy_block(mk_path):
 
     removed = end - start + 1
     del lines[start:end + 1]
-    # 块尾部自带的空行也一并收掉
     if start < len(lines) and not lines[start].strip():
         del lines[start]
 
@@ -149,17 +156,27 @@ def main():
         return 2
 
     target = sys.argv[1]
-    if target.endswith("Makefile"):
-        pkg_dir = os.path.dirname(target) or "."
-    else:
-        pkg_dir = target
+    pkg_dir = os.path.dirname(target) if target.endswith("Makefile") else target
+    pkg_dir = pkg_dir or "."
 
     if not os.path.isdir(pkg_dir):
         print("!! 错误：找不到包目录 %s" % pkg_dir, file=sys.stderr)
         return 2
 
+    ver = read_pkg_version(pkg_dir)
+    if not ver:
+        print("!! 错误：无法从 %s/Makefile 读取 PKG_VERSION" % pkg_dir, file=sys.stderr)
+        return 2
+    if ver not in PATCH_SETS:
+        print("!! 错误：xray v%s 没有对应的精简补丁集（支持：%s）"
+              % (ver, ", ".join(sorted(PATCH_SETS))), file=sys.stderr)
+        print("   若确实要构建该版本且分区够大，请在 diy-part1.sh 里关掉精简门控；"
+              "否则请按现有补丁的结构为新版本补一套 xray-patches/%s/" % ver, file=sys.stderr)
+        return 1
+
+    names = PATCH_SETS[ver]
     here = os.path.dirname(os.path.abspath(__file__))
-    src_dir = os.path.join(here, "xray-patches")
+    src_dir = os.path.join(here, "xray-patches", ver)
     if not os.path.isdir(src_dir):
         print("!! 错误：找不到补丁源目录 %s" % src_dir, file=sys.stderr)
         return 2
@@ -167,8 +184,14 @@ def main():
     dst_dir = os.path.join(pkg_dir, "patches")
     os.makedirs(dst_dir, exist_ok=True)
 
+    # 清掉别的版本残留的补丁，避免两套混用（包本身不带 patches，故只匹配 NNN-*.patch）
+    for fn in sorted(os.listdir(dst_dir)):
+        if PATCH_NAME_RE.match(fn) and fn not in names:
+            os.remove(os.path.join(dst_dir, fn))
+            print("    清除异版本残留补丁 %s" % fn)
+
     changed = 0
-    for name in PATCH_NAMES:
+    for name in names:
         src = os.path.join(src_dir, name)
         dst = os.path.join(dst_dir, name)
         if not os.path.isfile(src):
@@ -183,15 +206,19 @@ def main():
                     continue
         shutil.copyfile(src, dst)
         changed += 1
-        hunks = data.count(b"\n@@ ") + data.count(b"@@ -") - data.count(b"\n@@ ")
         print("    %-28s 已写入（%d B）" % (name, len(data)))
 
     strip_legacy_block(os.path.join(pkg_dir, "Makefile"))
 
-    print("==> xray 精简 v3 就绪：补丁位于 %s（%d 个）" % (dst_dir, len(PATCH_NAMES)))
+    print("==> xray v%s 精简就绪：%d 个补丁位于 %s（新写入 %d 个）"
+          % (ver, len(names), dst_dir, changed))
     print("    Prepare 阶段由 Build/Patch 自动应用（PATCH_DIR=./patches），无需改 Makefile")
-    print("    预期：google.golang.org/grpc / gvisor / quic-go 全部退出编译")
-    print("    已完成：003 砍 grpc-gRPC（-2.04 MiB）；004 砍 wireguard+gvisor / QUIC / DoQ")
+    if ver == "1.8.4":
+        print("    预期：google.golang.org/grpc / gvisor / quic-go 全部退出编译")
+        print("    实测：xray 23,713,500 -> 21,537,356 B（003），再加 004 后 squashfs 9.309 MiB")
+    else:
+        print("    预期：google.golang.org/grpc / gvisor / quic-go(含 http3) 全部退出编译")
+        print("    结构同 1.8.4 那套；005 额外砍掉 1.8.24 新增的 splithttp/HTTP3")
     return 0
 
 
