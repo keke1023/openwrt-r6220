@@ -737,6 +737,63 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# [16b] EZVIZ CS-W3-WD1200G 原厂 16MB —— xray 内存保险 + zram 应急缓冲
+#   背景（2026-11-03 实测）：MemTotal 118MB，xray(1.8.24) RSS ~15MB +
+#   ngrokc 3.6MB + 双频 wifi，MemAvailable 仅 ~20MB，测速高峰存在 OOM 风险。
+#   两道保险（都只对选了 kmod-zram 的机型真正生效）：
+#   ① GOGC=75 + GOMEMLIMIT=32MiB：Go 堆软上限 + 更积极的 GC。
+#      xray 由 /etc/init.d/ssr-plus 顶部的 ln_start_bin 以普通子进程 & 拉起，
+#      不走 procd，无法用 procd_set_param env —— 在 init 脚本第 2 行插
+#      export 即可被子进程继承。32MiB ≈ 当前 Go 堆的 2.5 倍，平时不触发，
+#      峰值时 GC 提前介入防失控；GOMEMLIMIT 需 Go ≥1.19（本机型 Go 22.x）。
+#   ② 32MB zram swap（lz4/lzo 压缩，disksize 不预占内存，用到才吃）：
+#      复用与 [16] 相同的 init 脚本，但 [16] 的注入被门控在 -32m 改造机型，
+#      原厂 16M 配置（本段）单独注入一份；kmod-zram 由 config 提供。
+# ---------------------------------------------------------------------------
+if echo "${TARGET_CONFIG:-}" | grep -qE '^ezviz_cs-w3-wd1200g\.config$'; then
+  echo "==> [16b] ezviz 16MB：注入 xray 内存保险 + zram"
+  mkdir -p files/etc/init.d files/etc/uci-defaults
+  cat > files/etc/init.d/zramswap <<'ZRAMEOF'
+#!/bin/sh /etc/rc.common
+# 32MB zram swap —— 128MB 内存机型的应急缓冲（原厂 16MB 闪存版注入）
+# 由 r6220 云编译 diy-part2.sh 第 16b 段注入。
+START=11
+
+start() {
+	[ -e /sys/block/zram0/disksize ] || modprobe zram 2>/dev/null || return 0
+	[ "$(cat /sys/block/zram0/disksize 2>/dev/null)" = "0" ] || return 0
+	echo 33554432 > /sys/block/zram0/disksize 2>/dev/null || return 0
+	mkswap /dev/zram0 >/dev/null 2>&1
+	swapon -p 10 /dev/zram0 2>/dev/null
+}
+
+stop() {
+	swapoff /dev/zram0 2>/dev/null
+	echo 1 > /sys/block/zram0/reset 2>/dev/null
+}
+ZRAMEOF
+  chmod +x files/etc/init.d/zramswap
+  cat > files/etc/uci-defaults/99-enable-zramswap <<'UCIEOF'
+#!/bin/sh
+/etc/init.d/zramswap enable
+exit 0
+UCIEOF
+  chmod +x files/etc/uci-defaults/99-enable-zramswap
+  cat > files/etc/uci-defaults/99-xray-memopt <<'UCIEOF'
+#!/bin/sh
+# xray 内存保险：在 ssr-plus init 顶部注入 Go 运行时环境变量（幂等）
+if [ -f /etc/init.d/ssr-plus ] && ! grep -q GOMEMLIMIT /etc/init.d/ssr-plus; then
+  sed -i '1a export GOGC=75 GOMEMLIMIT=32MiB' /etc/init.d/ssr-plus
+fi
+exit 0
+UCIEOF
+  chmod +x files/etc/uci-defaults/99-xray-memopt
+  echo "  已注入 zramswap(32MB) + 99-xray-memopt（GOGC=75 GOMEMLIMIT=32MiB）"
+else
+  echo "==> [16b] 非 ezviz 16MB 机型，跳过内存保险注入"
+fi
+
+# ---------------------------------------------------------------------------
 # [17] A3004NS-dual：启用 MT7621 PPE 硬件 offload（nf_flow_table 硬件卸载路径）
 #   只对本机型生效：TARGET_CONFIG 由 workflow 的 DIY-P2 步骤注入矩阵机型名，
 #   为空或不含 a3004ns 时整段跳过，绝不污染其它机型（其它机型可能没有

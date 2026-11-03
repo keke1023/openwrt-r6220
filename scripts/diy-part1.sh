@@ -132,15 +132,11 @@ fi
 XRAY_MK="package/helloworld/xray-core/Makefile"
 XRAY_PIN_VER="1.8.24"
 XRAY_PIN_HASH="86e3e388c77cda4d8457a607356416c201c1f18bbed53f0a9e76a228508ff298"
-# ezviz（萤石 W3 原厂 16MB）例外：保持 pin 下来的 v1.8.4，不前移到 1.8.24。
-#   理由：这台 firmware 分区只有 14.5MiB（比 K2P 的 15.75MiB 还小 1.25MiB），
-#   1.8.24 比 1.8.4 大 0.8MiB，前移会把 overlay 压到 1MB 以下，ssr-plus 连节点
-#   配置都存不稳。1.8.4 的 reality 链路已逐文件核实完整（client-config.lua /
-#   ssrurl.htm / subscribe.lua / gen_config.lua 四处均有 realitySettings），不缺功能。
-#   若将来确实需要 1.8.24 的 REALITY/Vision 修复，删掉下面这个分支即可。
-if echo "${TARGET_CONFIG:-}" | grep -qE '^ezviz_cs-w3-wd1200g\.config$' && [ -f "$XRAY_MK" ]; then
-  echo "==> xray-core 保持 v$(grep -m1 '^PKG_VERSION:=' "$XRAY_MK" | cut -d'=' -f2)（ezviz 16MB 机型刻意不前移到 1.8.24，省约 0.8MiB）"
-elif [ -n "${PINNED:-}" ] && [ -f "$XRAY_MK" ]; then
+# 2026-11-03 起萤石也前移 1.8.24：实测（K2P 固件解包 vs 萤石 V6 固件解包）
+#   xray 1.8.4 squashfs 内压缩 3,940 KiB → 1.8.24 为 4,181 KiB，仅 +241 KiB，
+#   镜像 13312k → 约 13553k（预算 14336k，余 ~783k），overlay 1536k → 约 1295k。
+#   1.8.24 带来 Vision 断连修复 / XUDP 走 Vision / REALITY CloseWrite，值得。
+if [ -n "${PINNED:-}" ] && [ -f "$XRAY_MK" ]; then
   XRAY_CUR=$(grep -m1 '^PKG_VERSION:=' "$XRAY_MK" | cut -d'=' -f2)
   if [ "$XRAY_CUR" = "$XRAY_PIN_VER" ]; then
     echo "==> xray-core 已是 v$XRAY_PIN_VER，跳过版本前移"
