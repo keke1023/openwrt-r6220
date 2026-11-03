@@ -116,6 +116,48 @@ if [ -z "${PINNED:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 小闪存机型：把 xray-core 单独前移到 1.8 系最终版 v1.8.24（2024-08-30）
+#
+# 为什么只换 xray、不动 luci：a201839 这套 luci-app-ssr-plus 的 reality/vision
+# 字段已齐全、18.06 的 Lua CBI 也能跑；换 luci 会引入 luci-compat / nftables 等
+# 新依赖，风险远大于收益。所以 pin 住 luci，只改 xray-core 的版本与哈希。
+#
+# 体积实测（官方 mips32le release zip，与 squashfs 压缩率同源可比）：
+#   v1.8.4 = 18.19MiB → v1.8.8 = 20.01MiB → v1.8.24 = 21.28MiB（+17%）
+#   折算 squashfs 里约 4.8MiB → 5.6MiB，镜像约 +0.8MiB，
+#   即 13057k → 约 13880k，overlay 由 3.0MiB 降到约 2.2MiB。
+#   仍在 16128k 预算内，但余量不多：刷完不要再追加合计超过 0.5MiB 的包。
+# go.mod 要求 go 1.21.4，本机型用 Go 22.x（sbwml golang 22.x 分支）满足。
+# ---------------------------------------------------------------------------
+XRAY_MK="package/helloworld/xray-core/Makefile"
+XRAY_PIN_VER="1.8.24"
+XRAY_PIN_HASH="86e3e388c77cda4d8457a607356416c201c1f18bbed53f0a9e76a228508ff298"
+# ezviz（萤石 W3 原厂 16MB）例外：保持 pin 下来的 v1.8.4，不前移到 1.8.24。
+#   理由：这台 firmware 分区只有 14.5MiB（比 K2P 的 15.75MiB 还小 1.25MiB），
+#   1.8.24 比 1.8.4 大 0.8MiB，前移会把 overlay 压到 1MB 以下，ssr-plus 连节点
+#   配置都存不稳。1.8.4 的 reality 链路已逐文件核实完整（client-config.lua /
+#   ssrurl.htm / subscribe.lua / gen_config.lua 四处均有 realitySettings），不缺功能。
+#   若将来确实需要 1.8.24 的 REALITY/Vision 修复，删掉下面这个分支即可。
+if echo "${TARGET_CONFIG:-}" | grep -qE '^ezviz_cs-w3-wd1200g\.config$' && [ -f "$XRAY_MK" ]; then
+  echo "==> xray-core 保持 v$(grep -m1 '^PKG_VERSION:=' "$XRAY_MK" | cut -d'=' -f2)（ezviz 16MB 机型刻意不前移到 1.8.24，省约 0.8MiB）"
+elif [ -n "${PINNED:-}" ] && [ -f "$XRAY_MK" ]; then
+  XRAY_CUR=$(grep -m1 '^PKG_VERSION:=' "$XRAY_MK" | cut -d'=' -f2)
+  if [ "$XRAY_CUR" = "$XRAY_PIN_VER" ]; then
+    echo "==> xray-core 已是 v$XRAY_PIN_VER，跳过版本前移"
+  else
+    sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$XRAY_PIN_VER/" "$XRAY_MK"
+    sed -i "s/^PKG_HASH:=.*/PKG_HASH:=$XRAY_PIN_HASH/" "$XRAY_MK"
+    echo "==> xray-core 版本前移：v${XRAY_CUR:-?} -> v$XRAY_PIN_VER（1.8 系最终版）"
+    if ! grep -q "^PKG_VERSION:=$XRAY_PIN_VER" "$XRAY_MK" || \
+       ! grep -q "^PKG_HASH:=$XRAY_PIN_HASH" "$XRAY_MK"; then
+      echo "!! 错误：xray-core Makefile 的版本/哈希替换失败，请人工检查 $XRAY_MK"
+      exit 1
+    fi
+  fi
+  grep -E '^PKG_(VERSION|HASH):' "$XRAY_MK" | sed 's/^/    /'
+fi
+
+# ---------------------------------------------------------------------------
 # xray 二进制精简（按版本自动选补丁集；仅小闪存机型 PINNED 生效）
 # ---------------------------------------------------------------------------
 # v3 改用 OpenWrt 标准 patches 机制：把 unified diff 放进
@@ -240,47 +282,6 @@ case "$TARGET_CONFIG" in
     ;;
 esac
 
-# ---------------------------------------------------------------------------
-# 小闪存机型：把 xray-core 单独前移到 1.8 系最终版 v1.8.24（2024-08-30）
-#
-# 为什么只换 xray、不动 luci：a201839 这套 luci-app-ssr-plus 的 reality/vision
-# 字段已齐全、18.06 的 Lua CBI 也能跑；换 luci 会引入 luci-compat / nftables 等
-# 新依赖，风险远大于收益。所以 pin 住 luci，只改 xray-core 的版本与哈希。
-#
-# 体积实测（官方 mips32le release zip，与 squashfs 压缩率同源可比）：
-#   v1.8.4 = 18.19MiB → v1.8.8 = 20.01MiB → v1.8.24 = 21.28MiB（+17%）
-#   折算 squashfs 里约 4.8MiB → 5.6MiB，镜像约 +0.8MiB，
-#   即 13057k → 约 13880k，overlay 由 3.0MiB 降到约 2.2MiB。
-#   仍在 16128k 预算内，但余量不多：刷完不要再追加合计超过 0.5MiB 的包。
-# go.mod 要求 go 1.21.4，本机型用 Go 22.x（sbwml golang 22.x 分支）满足。
-# ---------------------------------------------------------------------------
-XRAY_MK="package/helloworld/xray-core/Makefile"
-XRAY_PIN_VER="1.8.24"
-XRAY_PIN_HASH="86e3e388c77cda4d8457a607356416c201c1f18bbed53f0a9e76a228508ff298"
-# ezviz（萤石 W3 原厂 16MB）例外：保持 pin 下来的 v1.8.4，不前移到 1.8.24。
-#   理由：这台 firmware 分区只有 14.5MiB（比 K2P 的 15.75MiB 还小 1.25MiB），
-#   1.8.24 比 1.8.4 大 0.8MiB，前移会把 overlay 压到 1MB 以下，ssr-plus 连节点
-#   配置都存不稳。1.8.4 的 reality 链路已逐文件核实完整（client-config.lua /
-#   ssrurl.htm / subscribe.lua / gen_config.lua 四处均有 realitySettings），不缺功能。
-#   若将来确实需要 1.8.24 的 REALITY/Vision 修复，删掉下面这个分支即可。
-if echo "${TARGET_CONFIG:-}" | grep -qE '^ezviz_cs-w3-wd1200g\.config$' && [ -f "$XRAY_MK" ]; then
-  echo "==> xray-core 保持 v$(grep -m1 '^PKG_VERSION:=' "$XRAY_MK" | cut -d'=' -f2)（ezviz 16MB 机型刻意不前移到 1.8.24，省约 0.8MiB）"
-elif [ -n "${PINNED:-}" ] && [ -f "$XRAY_MK" ]; then
-  XRAY_CUR=$(grep -m1 '^PKG_VERSION:=' "$XRAY_MK" | cut -d'=' -f2)
-  if [ "$XRAY_CUR" = "$XRAY_PIN_VER" ]; then
-    echo "==> xray-core 已是 v$XRAY_PIN_VER，跳过版本前移"
-  else
-    sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$XRAY_PIN_VER/" "$XRAY_MK"
-    sed -i "s/^PKG_HASH:=.*/PKG_HASH:=$XRAY_PIN_HASH/" "$XRAY_MK"
-    echo "==> xray-core 版本前移：v${XRAY_CUR:-?} -> v$XRAY_PIN_VER（1.8 系最终版）"
-    if ! grep -q "^PKG_VERSION:=$XRAY_PIN_VER" "$XRAY_MK" || \
-       ! grep -q "^PKG_HASH:=$XRAY_PIN_HASH" "$XRAY_MK"; then
-      echo "!! 错误：xray-core Makefile 的版本/哈希替换失败，请人工检查 $XRAY_MK"
-      exit 1
-    fi
-  fi
-  grep -E '^PKG_(VERSION|HASH):' "$XRAY_MK" | sed 's/^/    /'
-fi
 
 # 自检：确认 xray-core 版本与 ssr-plus 存在
 XRAY_VER=$(grep -m1 'PKG_VERSION:=' package/helloworld/xray-core/Makefile 2>/dev/null | cut -d'=' -f2)

@@ -94,13 +94,28 @@ DTS 里 `qcom,ath10k-calibration-variant = "ezviz-cs-w3-wd1200g-eup"` 决定驱�
 
 本仓库的 workflow 已支持 **matrix 多机型并行编译**，机制如下：
 
-1. `prepare` job 扫描 `config/*.config`，把文件名汇总成机型矩阵。
+1. `prepare` job 扫描机型配置目录，把文件名汇总成机型矩阵。
+   **目录按 `source_branch` 输入自动选**：`openwrt-18.06*` 读 `config-18.06/`，其余读 `config/`。
+   这样 18.06 的 16MB 机型不会污染 23.05 的 32MB 机型（反之亦然）。
 2. `build` job 按矩阵为每个机型起一个独立并行 job，互不影响（`fail-fast: false`，单个失败不影响其余）。
 3. 每个机型的 Release 标签按文件名区分，如 `r6220-2026.08.04-1745`。
 
+**只编其中几个机型（不必全量）：**
+
+`Run workflow` 时填 `targets` 输入，逗号分隔、按 config 基名模糊匹配，留空则编该目录下全部：
+
+```sh
+# 例：一次只编 K2P 和 WR1200JS 两个 16MB 机型（18.06 分支）
+gh workflow run build.yml --ref master \
+  -f source_branch=openwrt-18.06-k5.4 \
+  -f targets="k2p,wr1200js"
+```
+
+两个机型会各起一个 runner 并行跑，各自出 Release（`k2p-<日期>-<时分>` / `wr1200js-<日期>-<时分>`）。
+
 **新增一个机型，只需两步：**
 
-- 在 `config/` 下新建该机型的 `.config`（例如 `x86_64.config`、`newifi-d2.config`）。
+- 在对应目录下新建该机型的 `.config`（18.06 分支 → `config-18.06/`，23.05 → `config/`）。
 - 到 Actions 点 Run workflow，自动就会多编一个。
 
 > 提示：免费账户并行 job 数有限（通常 2 个），机型较多时会排队；跨架构机型（x86 / ramips / armvirt）每个 job 都要重新克隆源码，耗时较长，建议优先用同架构机型，或用 `actions/cache` 缓存 `dl/` 与 `feeds/`。
