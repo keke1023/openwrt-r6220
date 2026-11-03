@@ -1,0 +1,36 @@
+diff --git a/main/commands/all/commands.go b/main/commands/all/commands.go
+index 99f194d..bbc933b 100644
+--- a/main/commands/all/commands.go
++++ b/main/commands/all/commands.go
+@@ -1,7 +1,6 @@
+ package all
+ 
+ import (
+-	"github.com/xtls/xray-core/main/commands/all/api"
+ 	"github.com/xtls/xray-core/main/commands/all/convert"
+ 	"github.com/xtls/xray-core/main/commands/all/tls"
+ 	"github.com/xtls/xray-core/main/commands/base"
+@@ -12,7 +11,6 @@ import (
+ func init() {
+ 	base.RootCommand.Commands = append(
+ 		base.RootCommand.Commands,
+-		api.CmdAPI,
+ 		convert.CmdConvert,
+ 		tls.CmdTLS,
+ 		cmdUUID,
+diff --git a/main/distro/all/all.go b/main/distro/all/all.go
+index 6948a37..d9e214e 100644
+--- a/main/distro/all/all.go
++++ b/main/distro/all/all.go
+@@ -8,11 +8,6 @@ import (
+ 	_ "github.com/xtls/xray-core/app/proxyman/inbound"
+ 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
+ 
+-	// Default commander and all its services. This is an optional feature.
+-	_ "github.com/xtls/xray-core/app/commander"
+-	_ "github.com/xtls/xray-core/app/log/command"
+-	_ "github.com/xtls/xray-core/app/proxyman/command"
+-	_ "github.com/xtls/xray-core/app/stats/command"
+ 
+ 	// Developer preview services
+ 
