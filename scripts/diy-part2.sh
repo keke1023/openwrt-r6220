@@ -1260,3 +1260,65 @@ PYEOF
 else
   echo "==> [23] 非 WR1200JS 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 wpad-openssl 排除"
 fi
+
+# [24] K2P：闭源 mt_wifi 开机自动拉起接口（修复"重启后无线回到 disabled"）
+# ---------------------------------------------------------------------------
+# 根因（2026-11-04 实机确认）：
+#   immortalwrt openwrt-18.06-k5.4 的 K2P 闭源驱动链（kmod-mt7615d + mt_wifi 胶水 +
+#   luci-app-mtwifi）天生缺"开机自动起无线"这一环：
+#     - 91_load_wifi.sh（preinit）只 modprobe mt_wifi；probe 成功后 ra0/rax0/rai0
+#       接口被创建，但全是 DOWN 状态；
+#     - mt_wifi 不走 cfg80211/netifd（CFG80211_SUPPORT=n），18.06 的 netifd wifi up
+#       对它完全无效；
+#     - 唯一能拉起接口的是 /lib/wifi/mt7615.lua 的 mt7615_up()，只有 LuCI「MTK WiFi」
+#       页点启用才触发。
+#   结果：刷入后 LuCI 显示 rax0 "Wireless is disabled or not associated"，
+#   手动启用后正常（驱动/EEPROM/ePAeLNA 均无问题，仅是接口没人 up），重启又回到 down。
+#
+# 修复：注入 /etc/init.d/mtwifi-up（START=99，仅开机 boot() 执行一次），
+#   等价于 mt7615_up()：ifconfig up + brctl addif br-lan。
+#   SSID/加密等持久化由 dat profile（/etc/wireless/mt7615/*.dat）+ mtknvram 承担，
+#   不受本脚本影响；用户手动 down 掉的无线在本次运行内不会被重新拉起。
+#   其它机型不受影响（files/ 注入仅在本 TARGET_CONFIG=k2p.config 的独立构建里生效）。
+if echo "${TARGET_CONFIG:-}" | grep -qE '^k2p\.config$'; then
+  echo "==> [24] K2P：注入闭源 mt_wifi 开机自动拉起 init 脚本"
+  INIT_DIR="files/etc/init.d"
+  mkdir -p "$INIT_DIR"
+  cat > "$INIT_DIR/mtwifi-up" <<'MTWIFI_EOF'
+#!/bin/sh /etc/rc.common
+# K2P closed-source mt_wifi: bring ra0/rax0/rai0 up and bridge into br-lan at boot.
+# The immortalwrt 18.06-k5.4 glue never does this automatically (netifd cannot
+# manage the wext-based mt_wifi driver), so radios sit DOWN after every reboot.
+START=99
+STOP=10
+
+boot() {
+	# wait for mt_wifi probe to create the DBDC interfaces (usually instant;
+	# module is loaded from preinit_main via 91_load_wifi.sh)
+	local n=0
+	while [ "$n" -lt 15 ] && [ ! -d /sys/class/net/rax0 ]; do
+		sleep 1
+		n=$((n+1))
+	done
+
+	# main AP vifs + apcli vifs (same set as /lib/wifi/mt7615.lua mt7615_up)
+	for i in ra0 apcli0 rax0 apclix0 rai0 apclii0; do
+		[ -d /sys/class/net/$i ] || continue
+		ifconfig "$i" up 2>/dev/null
+	done
+
+	# bridge the three main AP vifs into br-lan (same as mt7615_up)
+	[ -d /sys/class/net/br-lan ] || return 0
+	for i in ra0 rax0 rai0; do
+		[ -d /sys/class/net/$i ] || continue
+		brctl addif br-lan "$i" 2>/dev/null
+	done
+}
+MTWIFI_EOF
+  chmod 755 "$INIT_DIR/mtwifi-up"
+  echo "    已写入 files/etc/init.d/mtwifi-up："
+  sed 's/^/       /' "$INIT_DIR/mtwifi-up"
+  echo "==> [24] K2P mtwifi-up 注入完成"
+else
+  echo "==> [24] 非 K2P 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 mtwifi 开机拉起注入"
+fi
