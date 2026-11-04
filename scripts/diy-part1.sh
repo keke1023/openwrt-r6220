@@ -77,7 +77,7 @@ echo "==> helloworld 已就绪，luci-app-ssr-plus 来自：package/helloworld/l
 #    届时必须同时把 USB 那几个包回开才有可行解。
 # 16MB SPI NOR 机型清单（**精确匹配 config 基名**，不用通配）：
 #   a3004ns-dual.config —— 纯有线（无线全关）
-#   k2p.config          —— 带开源 mt76 无线（mt7615e），比 a3004ns 更吃紧，同样必须 pin
+#   k2p.config          —— 带闭源 mt7615d 无线（2026-11-04 起换回，热重启修复），必须 pin
 #   ezviz_cs-w3-wd1200g.config —— 萤石 W3 原厂 16MB（ipq40xx / IPQ4018 + 128MB RAM）。
 #       注意与 23.05 的 ezviz_cs-w3-wd1200g-32m.config（已换 32MB 芯片）区分：
 #       这里只 pin 原厂 16MB 那个，32m 版仍走 master 最新。
@@ -232,30 +232,26 @@ if [ -f "$SSRP_MK" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# K2P：无线走开源 mt76 —— 先确认本分支自带该包（不满足就别继续，白烧一小时编译）
+# K2P：无线走闭源 mt7615d（mt_wifi）—— 先确认本分支自带该包（不满足就别继续，白烧一小时编译）
 # ---------------------------------------------------------------------------
-# 事实依据（已核对 immortalwrt openwrt-18.06-k5.4）：
-#   package/kernel/mt76/Makefile  PKG_SOURCE_DATE:=2021-10-23.1
-#   其 Makefile 内定义了 KernelPackage/mt76-core、mt76-connac、mt7615-common、
-#   mt7615e、mt7615-firmware；patches 只有一个 001-allow-vht-on-2g.patch（正是给
-#   MT7615 的 2.4G VHT 用的）。因此**不需要从 21.02 搬源码**，只需改 DEVICE_PACKAGES
-#   与 config（见 diy-part2.sh 第 [18] 段）。
+# 2026-11-04 变更：开源 mt76（2021-10-23.1）对 MT7615D DBDC 热重启有 bug
+#   （系统内 reboot 后 radio1 phy 消失 / radio0 HOSTAPD_START_FAILED，实机复现），
+#   换回上游默认闭源 kmod-mt7615d。diy-part2.sh [18] 段已默认停用。
+#   如需切回开源方案：CI 带 K2P_OPEN_MT76=1，并把下方校验换回 mt76 一套。
 case "$TARGET_CONFIG" in
   *k2p*)
-    echo "==> K2P：校验本分支自带的开源 mt76 包"
-    MT76_MK="package/kernel/mt76/Makefile"
-    if [ ! -f "$MT76_MK" ]; then
-      echo "!! 错误：$MT76_MK 不存在 —— 本分支没有 mt76，需要另行搬运（原计划从 21.02 取）"
+    echo "==> K2P：校验本分支自带的闭源 mt7615d / luci-app-mtwifi"
+    MT15D_MK="package/kernel/mt-drivers/mt7615d/Makefile"
+    MTWIFI_MK="package/emortal/luci-app-mtwifi/Makefile"
+    if [ ! -f "$MT15D_MK" ]; then
+      echo "!! 错误：$MT15D_MK 不存在 —— 本分支没有闭源 mt7615d（mt-drivers）"
       exit 1
     fi
-    for sym in mt7615e mt7615-common mt7615-firmware mt76-core mt76-connac; do
-      if ! grep -q "KernelPackage/$sym\$" "$MT76_MK"; then
-        echo "!! 错误：$MT76_MK 里没有 KernelPackage/$sym，开源无线方案不成立"
-        exit 1
-      fi
-    done
-    echo "    OK：kmod-mt7615e / mt7615-common / mt7615-firmware / mt76-core / mt76-connac 齐备"
-    echo "    mt76 版本：$(grep -m1 '^PKG_SOURCE_DATE:=' "$MT76_MK" | cut -d= -f2)"
+    if [ ! -f "$MTWIFI_MK" ]; then
+      echo "!! 错误：$MTWIFI_MK 不存在 —— 闭源驱动只能用 luci-app-mtwifi 配网"
+      exit 1
+    fi
+    echo "    OK：mt7615d 版本 $(grep -m1 '^PKG_VERSION:=' "$MT15D_MK" | cut -d= -f2)，mtwifi 前端齐备"
     ;;
   *wr1200js*)
     # WR1200JS：上游 DEVICE_PACKAGES 就是 kmod-mt7603 + kmod-mt76x2（开源），

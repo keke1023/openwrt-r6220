@@ -898,7 +898,13 @@ fi
 #   「默认 y」的身份参与 kconfig 求解；config 里的 =n 在 defconfig 阶段会被翻回，
 #   只有改掉源头（这一行）才彻底。
 # ---------------------------------------------------------------------------
-if echo "${TARGET_CONFIG:-}" | grep -qiE 'k2p'; then
+# ⚠️ 2026-11-04 实机结论：开源 mt76（2021-10-23.1 树）对 MT7615D 单芯片 DBDC 的
+#   热重启处理有 bug —— 首启无线正常，系统内 reboot 后 radio1 的 phy 消失、
+#   radio0 hostapd 起超时（HOSTAPD_START_FAILED），只能断电冷启动恢复。
+#   故本段【默认停用】，K2P 回到上游闭源 kmod-mt7615d（mt_wifi 5.1.0.0，
+#   热重启处理成熟）。需要切回开源方案时：CI 触发时带 K2P_OPEN_MT76=1。
+# ---------------------------------------------------------------------------
+if [ "${K2P_OPEN_MT76:-0}" = "1" ] && echo "${TARGET_CONFIG:-}" | grep -qiE 'k2p'; then
   echo "==> [18] K2P：DEVICE_PACKAGES 换成开源 mt76（kmod-mt7615e + firmware）"
   MK="target/linux/ramips/image/mt7621.mk"
   if [ ! -f "$MK" ]; then
@@ -927,7 +933,7 @@ PYEOF
   echo "  当前 K2P 定义："
   grep -n -A 6 "define Device/phicomm_k2p" "$MK" | sed 's/^/     /'
 else
-  echo "==> [18] 非 K2P 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过开源无线替换"
+  echo "==> [18] 跳过开源 mt76 替换（K2P 默认走闭源 mt7615d；要切回开源请带 K2P_OPEN_MT76=1）"
 fi
 
 # ===========================================================================

@@ -335,32 +335,27 @@ jobs:
           fi
 
           if echo "$CFG" | grep -qE '^k2p\.config$'; then
-            # K2P 反向校验：开源 mt7615e 全家必须在，且闭源 mt_wifi 必须不在。
-            # 少了任一 kmod，固件会「能开机、没 wifi」—— 只有当 kconfig 解析结果
-            # （make 真正看到的视图）里都在，才说明 DEVICE_PACKAGES 改对了。
+            # K2P 反向校验（2026-11-04 起闭源）：mt_wifi 全家必须在，开源 mt7615e 必须不在。
+            # 背景：开源 mt76（2021-10 树）对 MT7615D DBDC 热重启有 bug（radio1 phy
+            # 消失 / HOSTAPD_START_FAILED），实机验证无法正常使用，已换回闭源驱动。
             MISS=""
-            # 只校验“菜单里可选”的包（mt76-core / mt76-connac / mt7615-common 是
-            # HIDDEN:=1，由上层依赖自动 select，不能也不该在 .config 里硬写 =y；
-            # 它们是否真的 y，等内核 .config 里的 CONFIG_MT7615E 一并看）
-            for p in kmod-mt7615e kmod-mt7615-firmware kmod-mac80211 kmod-cfg80211 wpad-basic; do
+            for p in kmod-mt7615d luci-app-mtwifi kmod-mac80211 kmod-cfg80211 wpad-basic; do
               grep -qE "^CONFIG_PACKAGE_${p}=y$" /tmp/resolved.config || MISS="$MISS $p"
             done
             if [ -n "$MISS" ]; then
-              echo "!! 失败：以下开源无线包在 kconfig 解析后不是 y："
+              echo "!! 失败：以下闭源无线包在 kconfig 解析后不是 y："
               for p in $MISS; do echo "   CONFIG_PACKAGE_${p}"; done
-              echo "!! 排查：DEVICE_PACKAGES 是否已由 diy-part2 第 [18] 段改成 kmod-mt7615e？"
-              echo "         config 里是否误写成 kmod-mt7615e=n？"
+              echo "!! 排查：diy-part2 第 [18] 段是否被 K2P_OPEN_MT76=1 误触发？"
+              echo "         config 里 kmod-mt7615d/luci-app-mtwifi 是否被写成 =n？"
               exit 1
             fi
-            echo "   隐藏依赖链（由 select 自动拉入，仅供参考）："
-            grep -E '^CONFIG_PACKAGE_(kmod-mt76-core|kmod-mt76-connac|kmod-mt7615-common)=' /tmp/resolved.config || true
-            BADC=$(grep -E '^CONFIG_PACKAGE_(kmod-mt7615d|luci-app-mtwifi)=(y|m)$' /tmp/resolved.config || true)
+            BADC=$(grep -E '^CONFIG_PACKAGE_(kmod-mt7615e|kmod-mt7615-firmware)=(y|m)$' /tmp/resolved.config || true)
             if [ -n "$BADC" ]; then
-              echo "!! 失败：闭源 mt_wifi 驱动仍被选中（会与开源 mt7615e 抢同一张 PCI 卡，且多占 ~0.85MB）："
+              echo "!! 失败：开源 mt7615e 驱动仍被选中（会与闭源 mt_wifi 抢同一张 PCI 卡）："
               echo "$BADC"
               exit 1
             fi
-            echo "OK：K2P 开源无线栈齐备且无闭源驱动"
+            echo "OK：K2P 闭源无线栈齐备且无开源 mt7615e"
           fi
 
           if echo "$CFG" | grep -qE '^wr1200js\.config$'; then
