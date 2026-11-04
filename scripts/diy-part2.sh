@@ -853,6 +853,36 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# [16d] K2P：启用 BBR 拥塞控制（kmod-tcp-bbr 已由 config 提供）
+#   代理链路（xray → VPS）的 TCP 提质：BBR 抗丢包/跨洋链路明显优于 cubic。
+#   双保险下发：
+#     a) files/etc/sysctl.d/99-bbr.conf —— /etc/init.d/sysctl 每次开机加载
+#     b) files/etc/uci-defaults/99-tcp-bbr —— 首启追加到 /etc/sysctl.conf
+#        （18.06 若 sysctl.d 未被 init 覆盖时的兜底；grep 幂等，重复执行无害）
+#   前提：CONFIG_NET_SCH_FQ 已由 mt7615d KCONFIG 强制 =y（内建），fq qdisc 可用。
+if echo "${TARGET_CONFIG:-}" | grep -qE '^k2p\.config$'; then
+  echo "==> [16d] K2P：注入 BBR sysctl（default_qdisc=fq + congestion_control=bbr）"
+  mkdir -p files/etc/sysctl.d files/etc/uci-defaults
+  cat > files/etc/sysctl.d/99-bbr.conf <<'BBR_EOF'
+# BBR for proxy throughput (r6220 云编译 [16d] 注入)
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+BBR_EOF
+  cat > files/etc/uci-defaults/99-tcp-bbr <<'BBR_UCI'
+#!/bin/sh
+# 兜底：把 BBR 两项追加进 /etc/sysctl.conf（幂等）
+if ! grep -q "tcp_congestion_control=bbr" /etc/sysctl.conf 2>/dev/null; then
+  printf '\n# BBR for proxy throughput (diy [16d])\nnet.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' >> /etc/sysctl.conf
+fi
+exit 0
+BBR_UCI
+  chmod +x files/etc/uci-defaults/99-tcp-bbr
+  echo "  已注入 files/etc/sysctl.d/99-bbr.conf + files/etc/uci-defaults/99-tcp-bbr"
+else
+  echo "==> [16d] 非 K2P 机型，跳过 BBR sysctl 注入"
+fi
+
+# ---------------------------------------------------------------------------
 # [17] A3004NS-dual：启用 MT7621 PPE 硬件 offload（nf_flow_table 硬件卸载路径）
 #   只对本机型生效：TARGET_CONFIG 由 workflow 的 DIY-P2 步骤注入矩阵机型名，
 #   为空或不含 a3004ns 时整段跳过，绝不污染其它机型（其它机型可能没有
