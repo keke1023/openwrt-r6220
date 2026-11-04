@@ -799,6 +799,60 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# [16c] xray 每连接缓冲瘦身（policy.levels[0].bufferSize 512KB → 4KB）
+#   背景：xray 默认每个连接预留 512KB 读缓冲（policy.levels[0].bufferSize=512），
+#   20 个并发连接 ≈ 10MB RSS —— 在 128MB 内存机型上是比版本差异更大的内存项。
+#   改法（落 ssr-plus 配置生成层 gen_config.lua，符合"只改脚本不整包"策略）：
+#     - bufferSize 512→4：每连接缓冲从 512KB 降到 4KB，RSS 直降；
+#     - connIdle 300→120：空闲连接更快回收（家用场景 120s 足够）；
+#     - handshake 4 / uplinkOnly 2 / downlinkOnly 5：维持默认或更紧。
+#   代价：吞吐略降（CPU 换内存），家用无感；mux/多连接场景收益最大。
+#   兼容性：helloworld master 与 pin 的 a201839 两个版本的 gen_config.lua 均
+#   含 "local Xray = {" 且均无 policy 字段（2026-11-04 逐一核实），注入点稳定。
+#   兜底：已含 bufferSize 则跳过（幂等）；找不到锚点则报错退出，绝不瞎写。
+#   门控机型：128MB 内存 + 跑 xray 的三台（ezviz / k2p / wr1200js）。
+# ---------------------------------------------------------------------------
+if echo "${TARGET_CONFIG:-}" | grep -qE '^(ezviz_cs-w3-wd1200g|k2p|wr1200js)\.config$'; then
+  echo "==> [16c] ${TARGET_CONFIG%%.config}：注入 xray bufferSize 内存瘦身"
+  GEN="package/helloworld/luci-app-ssr-plus/root/usr/share/shadowsocksr/gen_config.lua"
+  if [ ! -f "$GEN" ]; then
+    echo "  !! 错误：找不到 $GEN（helloworld clone/pin 失败？）"; exit 1
+  fi
+  python3 - "$GEN" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+if "bufferSize" in s:
+    print("  gen_config.lua 已含 bufferSize，跳过注入")
+    sys.exit(0)
+anchor = "local Xray = {"
+if s.count(anchor) != 1:
+    print("  !! 错误：锚点 'local Xray = {' 出现 %d 次（预期 1），放弃写入" % s.count(anchor))
+    sys.exit(1)
+policy = """local Xray = {
+	-- 内存保险（r6220 云编译 [16c] 注入）：每连接缓冲 512KB→4KB，空闲连接 300s→120s
+	policy = {
+		levels = {
+			["0"] = {
+				handshake = 4,
+				connIdle = 120,
+				uplinkOnly = 2,
+				downlinkOnly = 5,
+				bufferSize = 4
+			}
+		}
+	},"""
+s2 = s.replace(anchor, policy, 1)
+open(p, "w", encoding="utf-8").write(s2)
+print("  patched %s: policy.levels[0].bufferSize=4 connIdle=120" % p)
+PYEOF
+  [ $? -ne 0 ] && { echo "  !! 错误：gen_config.lua 补丁失败"; exit 1; }
+  grep -n -A 3 "bufferSize" "$GEN" | head -12 | sed 's/^/     /'
+else
+  echo "==> [16c] 非 ezviz/k2p/wr1200js 机型，跳过 xray bufferSize 注入"
+fi
+
+# ---------------------------------------------------------------------------
 # [17] A3004NS-dual：启用 MT7621 PPE 硬件 offload（nf_flow_table 硬件卸载路径）
 #   只对本机型生效：TARGET_CONFIG 由 workflow 的 DIY-P2 步骤注入矩阵机型名，
 #   为空或不含 a3004ns 时整段跳过，绝不污染其它机型（其它机型可能没有
