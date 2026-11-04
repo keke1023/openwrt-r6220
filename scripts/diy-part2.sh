@@ -737,9 +737,11 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# [16b] EZVIZ CS-W3-WD1200G 原厂 16MB —— xray 内存保险 + zram 应急缓冲
-#   背景（2026-11-03 实测）：MemTotal 118MB，xray(1.8.24) RSS ~15MB +
-#   ngrokc 3.6MB + 双频 wifi，MemAvailable 仅 ~20MB，测速高峰存在 OOM 风险。
+# [16b] xray 内存保险 + zram 应急缓冲（128MB 内存、跑 xray 的机型）
+#   背景（2026-11-03 ezviz 实测 / 2026-11-04 K2P 实测）：MemTotal 118MB，
+#   xray(1.8.24) RSS ~15MB + 双频 wifi（K2P 闭源 mt_wifi 另吃 20MB 不可回收
+#   slab），MemAvailable 仅 ~17-20MB，测速高峰存在 OOM 风险（victim 按 RSS
+#   排序，几乎必是 xray）。
 #   两道保险（都只对选了 kmod-zram 的机型真正生效）：
 #   ① GOGC=75 + GOMEMLIMIT=32MiB：Go 堆软上限 + 更积极的 GC。
 #      xray 由 /etc/init.d/ssr-plus 顶部的 ln_start_bin 以普通子进程 & 拉起，
@@ -748,10 +750,13 @@ fi
 #      峰值时 GC 提前介入防失控；GOMEMLIMIT 需 Go ≥1.19（本机型 Go 22.x）。
 #   ② 32MB zram swap（lz4/lzo 压缩，disksize 不预占内存，用到才吃）：
 #      复用与 [16] 相同的 init 脚本，但 [16] 的注入被门控在 -32m 改造机型，
-#      原厂 16M 配置（本段）单独注入一份；kmod-zram 由 config 提供。
+#      原厂 16M 配置（本段）单独注入一份；kmod-zram 由各自 config 提供。
+#   门控机型：ezviz_cs-w3-wd1200g（2026-11-03）、k2p（2026-11-04，同 118MB
+#   内存 + 16MB 闪存 + xray，实测同款风险）。其它机型要加：改本段正则 +
+#   在对应 config 里加 CONFIG_PACKAGE_kmod-zram=y。
 # ---------------------------------------------------------------------------
-if echo "${TARGET_CONFIG:-}" | grep -qE '^ezviz_cs-w3-wd1200g\.config$'; then
-  echo "==> [16b] ezviz 16MB：注入 xray 内存保险 + zram"
+if echo "${TARGET_CONFIG:-}" | grep -qE '^(ezviz_cs-w3-wd1200g|k2p)\.config$'; then
+  echo "==> [16b] ${TARGET_CONFIG%%.config}：注入 xray 内存保险 + zram"
   mkdir -p files/etc/init.d files/etc/uci-defaults
   cat > files/etc/init.d/zramswap <<'ZRAMEOF'
 #!/bin/sh /etc/rc.common
@@ -790,7 +795,7 @@ UCIEOF
   chmod +x files/etc/uci-defaults/99-xray-memopt
   echo "  已注入 zramswap(32MB) + 99-xray-memopt（GOGC=75 GOMEMLIMIT=32MiB）"
 else
-  echo "==> [16b] 非 ezviz 16MB 机型，跳过内存保险注入"
+  echo "==> [16b] 非 ezviz/k2p 机型，跳过内存保险注入"
 fi
 
 # ---------------------------------------------------------------------------
