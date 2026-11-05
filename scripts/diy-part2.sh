@@ -858,7 +858,7 @@ fi
 #   代理链路（xray → VPS）的 TCP 提质：BBR 抗丢包/跨洋链路明显优于 cubic。
 #   差异化下发（按机型内核条件）：
 #     k2p      —— default_qdisc=fq + bbr（NET_SCH_FQ 已由 mt7615d KCONFIG 强制内建）
-#     wr1200js —— 仅 bbr（单核 QCA9558，qdisc 保持默认 fq_codel；内核未必编了
+#     wr1200js —— 仅 bbr（MT7621 双核，qdisc 保持默认 fq_codel；内核未必编了
 #                 纯 fq，不写 default_qdisc 避免指向不存在的 qdisc；BBR 自带
 #                 pacing，不依赖 fq）
 #   双保险下发：
