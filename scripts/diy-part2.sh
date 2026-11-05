@@ -752,10 +752,11 @@ fi
 #      复用与 [16] 相同的 init 脚本，但 [16] 的注入被门控在 -32m 改造机型，
 #      原厂 16M 配置（本段）单独注入一份；kmod-zram 由各自 config 提供。
 #   门控机型：ezviz_cs-w3-wd1200g（2026-11-03）、k2p（2026-11-04，同 118MB
-#   内存 + 16MB 闪存 + xray，实测同款风险）。其它机型要加：改本段正则 +
-#   在对应 config 里加 CONFIG_PACKAGE_kmod-zram=y。
+#   内存 + 16MB 闪存 + xray，实测同款风险）、wr1200js（2026-11-05，128MB +
+#   开源 mt76 无闭源 slab，zram/GOMEMLIMIT 作为零成本保险对齐）。其它机型要
+#   加：改本段正则 + 在对应 config 里加 CONFIG_PACKAGE_kmod-zram=y。
 # ---------------------------------------------------------------------------
-if echo "${TARGET_CONFIG:-}" | grep -qE '^(ezviz_cs-w3-wd1200g|k2p)\.config$'; then
+if echo "${TARGET_CONFIG:-}" | grep -qE '^(ezviz_cs-w3-wd1200g|k2p|wr1200js)\.config$'; then
   echo "==> [16b] ${TARGET_CONFIG%%.config}：注入 xray 内存保险 + zram"
   mkdir -p files/etc/init.d files/etc/uci-defaults
   cat > files/etc/init.d/zramswap <<'ZRAMEOF'
@@ -795,7 +796,7 @@ UCIEOF
   chmod +x files/etc/uci-defaults/99-xray-memopt
   echo "  已注入 zramswap(32MB) + 99-xray-memopt（GOGC=75 GOMEMLIMIT=32MiB）"
 else
-  echo "==> [16b] 非 ezviz/k2p 机型，跳过内存保险注入"
+  echo "==> [16b] 非 ezviz/k2p/wr1200js 机型，跳过内存保险注入"
 fi
 
 # ---------------------------------------------------------------------------
@@ -853,33 +854,42 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# [16d] K2P：启用 BBR 拥塞控制（kmod-tcp-bbr 已由 config 提供）
+# [16d] 启用 BBR 拥塞控制（kmod-tcp-bbr 由各自 config 提供）
 #   代理链路（xray → VPS）的 TCP 提质：BBR 抗丢包/跨洋链路明显优于 cubic。
+#   差异化下发（按机型内核条件）：
+#     k2p      —— default_qdisc=fq + bbr（NET_SCH_FQ 已由 mt7615d KCONFIG 强制内建）
+#     wr1200js —— 仅 bbr（单核 QCA9558，qdisc 保持默认 fq_codel；内核未必编了
+#                 纯 fq，不写 default_qdisc 避免指向不存在的 qdisc；BBR 自带
+#                 pacing，不依赖 fq）
 #   双保险下发：
 #     a) files/etc/sysctl.d/99-bbr.conf —— /etc/init.d/sysctl 每次开机加载
 #     b) files/etc/uci-defaults/99-tcp-bbr —— 首启追加到 /etc/sysctl.conf
-#        （18.06 若 sysctl.d 未被 init 覆盖时的兜底；grep 幂等，重复执行无害）
-#   前提：CONFIG_NET_SCH_FQ 已由 mt7615d KCONFIG 强制 =y（内建），fq qdisc 可用。
-if echo "${TARGET_CONFIG:-}" | grep -qE '^k2p\.config$'; then
-  echo "==> [16d] K2P：注入 BBR sysctl（default_qdisc=fq + congestion_control=bbr）"
+#        （grep 幂等，重复执行无害）
+if echo "${TARGET_CONFIG:-}" | grep -qE '^(k2p|wr1200js)\.config$'; then
+  echo "==> [16d] ${TARGET_CONFIG%%.config}：注入 BBR sysctl"
   mkdir -p files/etc/sysctl.d files/etc/uci-defaults
-  cat > files/etc/sysctl.d/99-bbr.conf <<'BBR_EOF'
-# BBR for proxy throughput (r6220 云编译 [16d] 注入)
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-BBR_EOF
-  cat > files/etc/uci-defaults/99-tcp-bbr <<'BBR_UCI'
+  if echo "${TARGET_CONFIG:-}" | grep -qE '^k2p\.config$'; then
+    BBR_LINES="net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr"
+    BBR_TAG="fq + bbr"
+  else
+    BBR_LINES="net.ipv4.tcp_congestion_control=bbr"
+    BBR_TAG="bbr only (qdisc stays default)"
+  fi
+  printf '# BBR for proxy throughput (r6220 云编译 [16d] 注入)\n%b\n' "$BBR_LINES" > files/etc/sysctl.d/99-bbr.conf
+  cat > files/etc/uci-defaults/99-tcp-bbr <<BBR_UCI
 #!/bin/sh
-# 兜底：把 BBR 两项追加进 /etc/sysctl.conf（幂等）
+# 兜底：把 BBR sysctl 追加进 /etc/sysctl.conf（幂等；$BBR_TAG）
 if ! grep -q "tcp_congestion_control=bbr" /etc/sysctl.conf 2>/dev/null; then
-  printf '\n# BBR for proxy throughput (diy [16d])\nnet.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' >> /etc/sysctl.conf
+  printf '\n# BBR for proxy throughput (diy [16d])\n${BBR_LINES}\n' >> /etc/sysctl.conf
 fi
 exit 0
 BBR_UCI
   chmod +x files/etc/uci-defaults/99-tcp-bbr
-  echo "  已注入 files/etc/sysctl.d/99-bbr.conf + files/etc/uci-defaults/99-tcp-bbr"
+  echo "  已注入 files/etc/sysctl.d/99-bbr.conf + files/etc/uci-defaults/99-tcp-bbr（$BBR_TAG）"
+  echo "  --- 99-bbr.conf 内容 ---"
+  sed 's/^/     /' files/etc/sysctl.d/99-bbr.conf
 else
-  echo "==> [16d] 非 K2P 机型，跳过 BBR sysctl 注入"
+  echo "==> [16d] 非 k2p/wr1200js 机型，跳过 BBR sysctl 注入"
 fi
 
 # ---------------------------------------------------------------------------
