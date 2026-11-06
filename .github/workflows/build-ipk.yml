@@ -24,7 +24,7 @@ on:
           - ipq40xx/generic
           - ath79/nand
       package:
-        description: '要编译的软件包名（含 luci- 前缀），默认 luci-app-ssr-plus'
+        description: '要编译的软件包名。普通包如 luci-app-ssr-plus；内核模块填 kmod-xxx（如 kmod-zram）'
         required: true
         default: 'luci-app-ssr-plus'
       feed_branch:
@@ -55,23 +55,57 @@ jobs:
         id: env
         run: echo "target_key=$(echo '${{ inputs.target }}' | tr '/' '-')" >> $GITHUB_OUTPUT
 
+      # ---------------------------------------------------------------------
+      # kmod 与普通包走完全不同的编译入口，必须提前分流：
+      #   普通包：feeds install 把包软链进 package/feeds/<feed>/，再 make package/<包名>/compile
+      #   kmod  ：全部定义在源码树内 package/kernel/linux/modules/*.mk 里（例如 zram 在
+      #           other.mk），既没有 feeds 条目、也没有 package/<包名> 目录，
+      #           `make package/kmod-zram/compile` 会直接 "No rule to make target"。
+      #           正确入口是 make package/kernel/linux/compile —— 它会遍历所有
+      #           KernelPackage，只编译 .config 里选中的那些。
+      # ---------------------------------------------------------------------
+      - name: 解析包类型（kmod 与 feeds 包走不同编译入口）
+        id: pkg
+        run: |
+          PKG="${{ inputs.package }}"
+          case "$PKG" in
+            kmod-*)
+              echo "kind=kmod" >> $GITHUB_OUTPUT
+              echo "make_target=package/kernel/linux" >> $GITHUB_OUTPUT
+              echo "==> 识别为内核模块包：走 package/kernel/linux 编译入口" ;;
+            *)
+              echo "kind=pkg" >> $GITHUB_OUTPUT
+              echo "make_target=package/$PKG" >> $GITHUB_OUTPUT
+              echo "==> 识别为普通软件包：走 package/$PKG 编译入口" ;;
+          esac
+
       - name: 清理磁盘空间（避免 runner 空间不足）
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo apt-get clean
           df -hT $PWD
 
+      # apt 加固：裸 apt-get 没有超时会一路挂到 job 的 6 小时上限（run 41471719379 实测
+      # 卡此步 90 分钟无输出，而正常基线只要 72 秒），故统一套 timeout + 重试 + IPv4。
       - name: 安装编译依赖
+        timeout-minutes: 40
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils \
-            bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex \
-            gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool \
-            libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-            libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev \
-            libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf qemu-utils \
-            rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim \
-            wget xmlto xxd zlib1g-dev jq python3-pyelftools
+          APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::ForceIPv4=true"
+          PKGS="ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev jq python3-pyelftools"
+          sudo timeout 300 apt-get $APT_OPTS update || echo "!! apt-get update 超时或部分源失败，仍继续尝试安装"
+          ok=0
+          for i in 1 2 3; do
+            echo "--- 编译依赖安装：第 $i 次尝试（上限 700s）---"
+            if sudo timeout 700 apt-get $APT_OPTS install -y $PKGS; then ok=1; break; fi
+            echo "!! 第 $i 次失败或超时，20s 后重试"
+            sleep 20
+            sudo timeout 120 apt-get $APT_OPTS update || true
+          done
+          if [ "$ok" != "1" ]; then
+            echo "!! 编译依赖安装失败（3 次重试均未成功），提前报错退出"
+            exit 1
+          fi
+          echo "OK：编译依赖安装完成"
 
       - name: 克隆 immortalwrt 源码（分支由 source_branch 输入决定，默认 openwrt-23.05）
         run: git clone --depth 1 $REPO_URL -b "${{ inputs.source_branch || env.REPO_BRANCH }}" openwrt
@@ -90,8 +124,13 @@ jobs:
       - name: 更新并安装 feeds（仅装目标包及其依赖）
         run: |
           cd openwrt
+          # feeds update -a 保留：目标包可能依赖 feeds 里的库（如 xray-core 依赖的 golang 源）
           ./scripts/feeds update -a
-          ./scripts/feeds install ${{ inputs.package }}
+          if [ "${{ steps.pkg.outputs.kind }}" = "kmod" ]; then
+            echo "==> kmod 在源码树内（package/kernel/linux/modules/*.mk），跳过 feeds install"
+          else
+            ./scripts/feeds install ${{ inputs.package }}
+          fi
 
       # ---------------------------------------------------------------------
       # 缓存 1：dl 源码包（与固件编译共享同一份 openwrt-dl 缓存，最大提速）
@@ -124,7 +163,17 @@ jobs:
           # 全程跑成 staging_dir/target-x86_64_musl 导致产物架构错误）。
           PARENT=$(echo '${{ inputs.target }}' | cut -d/ -f1)
           SUB=$(echo '${{ inputs.target }}' | cut -d/ -f2)
-          cat > .config <<EOF
+          if [ "${{ steps.pkg.outputs.kind }}" = "kmod" ]; then
+            # kmod 只需要目标架构 + 这一个内核模块；压缩算法等依赖由包自身的
+            # select（zram 默认 ZRAM_DEF_COMP_LZORLE → kmod-lib-lzo）自动带入。
+            cat > .config <<EOF
+          CONFIG_TARGET_${PARENT}=y
+          CONFIG_TARGET_${PARENT}_${SUB}=y
+          CONFIG_CCACHE=y
+          CONFIG_PACKAGE_${{ inputs.package }}=y
+          EOF
+          else
+            cat > .config <<EOF
           CONFIG_TARGET_${PARENT}=y
           CONFIG_TARGET_${PARENT}_${SUB}=y
           CONFIG_CCACHE=y
@@ -135,6 +184,7 @@ jobs:
           CONFIG_INCLUDE_MosDNS=n
           CONFIG_INCLUDE_Shadowsocks_Libev_Client=y
           EOF
+          fi
           make defconfig
           # 防御校验：目标架构必须真正生效，否则立即失败（比编到最后才发现架构错了强得多）
           if ! grep -q "^CONFIG_TARGET_${PARENT}_${SUB}=y" .config; then
@@ -162,6 +212,56 @@ jobs:
           make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
 
       # ---------------------------------------------------------------------
+      # kmod 能不能产出 ipk，取决于它声明的 KCONFIG 是否真被写进目标内核配置。
+      # 这里在编内核（20~40 分钟）之前先 prepare + 校验，符号缺失就立刻失败，
+      # 避免白跑一轮才发现 kmod .ko 根本没编出来。
+      # ---------------------------------------------------------------------
+      - name: 校验目标内核符号已置 m（kmod 专用前置）
+        if: steps.pkg.outputs.kind == 'kmod'
+        run: |
+          cd openwrt
+          make target/linux/prepare V=s
+          KC=$(ls -1 build_dir/target-*/linux-*/linux-*/.config 2>/dev/null | head -1)
+          if [ -z "$KC" ]; then
+            echo "!! 未找到目标内核 .config，prepare 可能失败"
+            exit 1
+          fi
+          echo "内核配置：$KC"
+          python3 - "${{ inputs.package }}" "$KC" <<'PYEOF'
+          import glob, re, sys
+          pkg, kc = sys.argv[1], sys.argv[2]
+          name = pkg[len("kmod-"):]
+          kcs = []
+          for p in sorted(glob.glob("package/kernel/linux/modules/*.mk")):
+              s = open(p, encoding="utf-8").read()
+              m = re.search(r"^define KernelPackage/%s\s*$" % re.escape(name), s, re.M)
+              if not m:
+                  continue
+              blk = s[m.end():]
+              blk = blk[:blk.find("\nendef")]
+              for line in blk.split("\n"):
+                  if "=" in line:          # 形如 CONFIG_ZRAM_DEBUG=n 的强制值，不校验
+                      continue
+                  kcs += re.findall(r"CONFIG_[A-Z0-9_]+", line)
+              print("找到包定义：%s -> %s" % (p, name))
+              break
+          if not kcs:
+              print("!! modules/*.mk 里没找到 KernelPackage/%s 的 KCONFIG 行" % name)
+              sys.exit(1)
+          cfg = open(kc, encoding="utf-8").read()
+          bad = []
+          for k in kcs:
+              m = re.search(r"^%s=([ym])$" % k, cfg, re.M)
+              print("  %-28s -> %s" % (k, m.group(1) if m else "缺失"))
+              if not m:
+                  bad.append(k)
+          if bad:
+              print("!! 内核符号未置 m：%s（kmod .ko 不会产出）" % " ".join(bad))
+              sys.exit(1)
+          print("OK：内核符号齐备，kmod 可以打包出 ipk")
+          PYEOF
+
+      # ---------------------------------------------------------------------
       # 关键：内核同样不会自动编译！
       # defconfig 默认会选中 gpio-button-hotplug / mt76 wifi 等 kmod，它们的 .built 依赖
       # build_dir/.../linux-<ver>/.config + Module.symvers，而 make package/X/compile
@@ -177,8 +277,11 @@ jobs:
         id: compile
         run: |
           cd openwrt
-          echo "==> make package/${{ inputs.package }}/compile"
-          make package/${{ inputs.package }}/compile -j$(nproc) V=s || make package/${{ inputs.package }}/compile -j1 V=s
+          TARGET_DIR="${{ steps.pkg.outputs.make_target }}"
+          echo "==> make ${TARGET_DIR}/compile"
+          # kmod 走 package/kernel/linux：会把 .config 里所有选中的内核模块都打包一遍
+          # （内核本身已在上一步编好，这一步主要是 strip + 打 ipk，速度很快）
+          make ${TARGET_DIR}/compile -j$(nproc) V=s || make ${TARGET_DIR}/compile -j1 V=s
           echo "status=success" >> $GITHUB_OUTPUT
 
       - name: 列出产物 IPK
