@@ -314,17 +314,32 @@ jobs:
           make ${TARGET_DIR}/compile -j$(nproc) V=s || make ${TARGET_DIR}/compile -j1 V=s
           echo "status=success" >> $GITHUB_OUTPUT
 
+      # ⚠️ 内核模块的 ipk 不在 bin/packages/，而在 bin/targets/<t>/<s>/packages/
+      #    （package/kernel/linux 走 target 侧打包路径）。只打包 bin/packages
+      #    会漏掉 kmod-zram 本身，只剩 feeds 编出来的固件包 —— 已踩过。
       - name: 列出产物 IPK
         if: steps.compile.outputs.status == 'success'
         run: |
           cd openwrt
-          echo "=== 生成的 IPK ==="
-          find bin/packages -name '*.ipk' | sort
+          echo "=== bin/targets（内核模块与固件包）==="
+          find bin/targets -path '*/packages/*' -name '*.ipk' 2>/dev/null | sort
+          echo "=== bin/packages（feeds 包与依赖）==="
+          find bin/packages -name '*.ipk' 2>/dev/null | sort
+          echo "=== 目标包是否产出 ==="
+          HIT=$(find bin/targets bin/packages -name "${{ inputs.package }}_*.ipk" 2>/dev/null || true)
+          if [ -n "$HIT" ]; then
+            echo "$HIT"
+          else
+            echo "!! 没有找到 ${{ inputs.package }}_*.ipk"
+            exit 1
+          fi
 
       - name: 上传 IPK（含依赖）
         if: steps.compile.outputs.status == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: ipk-${{ inputs.package }}-${{ steps.env.outputs.target_key }}
-          path: openwrt/bin/packages/**/*.ipk
+          path: |
+            openwrt/bin/targets/*/*/packages/*.ipk
+            openwrt/bin/packages/**/*.ipk
           retention-days: 14
