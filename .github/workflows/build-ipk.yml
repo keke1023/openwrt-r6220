@@ -213,52 +213,56 @@ jobs:
 
       # ---------------------------------------------------------------------
       # kmod 能不能产出 ipk，取决于它声明的 KCONFIG 是否真被写进目标内核配置。
-      # 这里在编内核（20~40 分钟）之前先 prepare + 校验，符号缺失就立刻失败，
-      # 避免白跑一轮才发现 kmod .ko 根本没编出来。
+      # ⚠️ 踩过的坑：内核 .config 并不是 make target/linux/prepare 生成的，
+      #    prepare 只做解包 + 打补丁；.config 要等 target/linux/compile 里跑
+      #    oldconfig 才出现。所以「prepare 完就查 .config」必然找不到 → 误报失败。
+      # 改成两段式：
+      #   ① 编译前（秒级）：确认 kmod 已在顶层 .config 选中 + 能从 modules/*.mk
+      #      解析出它声明的 KCONFIG，把符号清单落到 /tmp/kmod-syms.txt；
+      #   ② 内核编译后：再拿真实内核 .config 逐个校验 =m，缺了才真失败。
       # ---------------------------------------------------------------------
-      - name: 校验目标内核符号已置 m（kmod 专用前置）
+      - name: 预检 kmod 定义与符号清单（kmod 专用，秒级）
         if: steps.pkg.outputs.kind == 'kmod'
         run: |
           cd openwrt
-          make target/linux/prepare V=s
-          KC=$(ls -1 build_dir/target-*/linux-*/linux-*/.config 2>/dev/null | head -1)
-          if [ -z "$KC" ]; then
-            echo "!! 未找到目标内核 .config，prepare 可能失败"
-            exit 1
-          fi
-          echo "内核配置：$KC"
-          python3 - "${{ inputs.package }}" "$KC" <<'PYEOF'
+          PKG="${{ inputs.package }}"
+          # 已选中该 kmod，其 KCONFIG 才会被注入内核 .config
+          grep -qE "^CONFIG_PACKAGE_${PKG}=y$" .config \
+            || { echo "!! 顶层 .config 里没有 CONFIG_PACKAGE_${PKG}=y"; exit 1; }
+          echo "OK：顶层 .config 已选中 ${PKG}"
+          python3 - "${PKG#kmod-}" <<'PYEOF'
           import glob, re, sys
-          pkg, kc = sys.argv[1], sys.argv[2]
-          name = pkg[len("kmod-"):]
-          kcs = []
+          name = sys.argv[1]
+          hit = None
           for p in sorted(glob.glob("package/kernel/linux/modules/*.mk")):
               s = open(p, encoding="utf-8").read()
               m = re.search(r"^define KernelPackage/%s\s*$" % re.escape(name), s, re.M)
               if not m:
                   continue
               blk = s[m.end():]
-              blk = blk[:blk.find("\nendef")]
+              end = blk.find("\nendef")
+              if end >= 0:
+                  blk = blk[:end]
+              kcs = []
               for line in blk.split("\n"):
-                  if "=" in line:          # 形如 CONFIG_ZRAM_DEBUG=n 的强制值，不校验
+                  if "=" in line:      # CONFIG_X=n 之类是强制值，不作为「必须 =m」的符号
                       continue
-                  kcs += re.findall(r"CONFIG_[A-Z0-9_]+", line)
-              print("找到包定义：%s -> %s" % (p, name))
+                  for k in re.findall(r"CONFIG_[A-Z0-9_]+", line):
+                      if k not in kcs:
+                          kcs.append(k)
+              hit = (p, kcs)
               break
+          if hit is None:
+              print("!! modules/*.mk 里找不到 KernelPackage/%s" % name)
+              sys.exit(1)
+          p, kcs = hit
           if not kcs:
-              print("!! modules/*.mk 里没找到 KernelPackage/%s 的 KCONFIG 行" % name)
+              print("!! KernelPackage/%s 未声明任何 KCONFIG 符号" % name)
               sys.exit(1)
-          cfg = open(kc, encoding="utf-8").read()
-          bad = []
-          for k in kcs:
-              m = re.search(r"^%s=([ym])$" % k, cfg, re.M)
-              print("  %-28s -> %s" % (k, m.group(1) if m else "缺失"))
-              if not m:
-                  bad.append(k)
-          if bad:
-              print("!! 内核符号未置 m：%s（kmod .ko 不会产出）" % " ".join(bad))
-              sys.exit(1)
-          print("OK：内核符号齐备，kmod 可以打包出 ipk")
+          print("定义位置：%s" % p)
+          print("应置 m 的内核符号：%s" % " ".join(kcs))
+          with open("/tmp/kmod-syms.txt", "w", encoding="utf-8") as f:
+              f.write("\n".join(kcs) + "\n")
           PYEOF
 
       # ---------------------------------------------------------------------
@@ -272,6 +276,32 @@ jobs:
         run: |
           cd openwrt
           make target/linux/compile -j$(nproc) || make target/linux/compile -j1 V=s
+
+      # 内核编完才存在 .config，这里做真实校验；缺符号说明该 kmod 的 KCONFIG
+      # 没被注入（被 target config 的 is not set 顶掉之类），直接失败别浪费时间。
+      - name: 校验内核符号已置 m（内核编译后）
+        if: steps.pkg.outputs.kind == 'kmod'
+        run: |
+          cd openwrt
+          KC=$(ls -1 build_dir/target-*/linux-*/linux-*/.config 2>/dev/null | head -1)
+          [ -n "$KC" ] || { echo "!! 内核 .config 不存在，内核编译没真正完成"; exit 1; }
+          echo "内核配置：$KC"
+          [ -s /tmp/kmod-syms.txt ] || { echo "!! /tmp/kmod-syms.txt 缺失或为空（预检步骤没跑到）"; exit 1; }
+          MISS=0
+          for k in $(cat /tmp/kmod-syms.txt); do
+            v=$(sed -n "s/^${k}=\([my]\)$/\1/p" "$KC" | head -1)
+            if [ "$v" = "m" ]; then
+              echo "  ${k} -> m"
+            elif [ "$v" = "y" ]; then
+              echo "  ${k} -> y（已编进内核，kmod 包会是空的，需改为模块）"
+              MISS=1
+            else
+              echo "  ${k} -> 缺失"
+              MISS=1
+            fi
+          done
+          [ "$MISS" -eq 0 ] || { echo "!! 有符号未置 m，kmod .ko 不会产出"; exit 1; }
+          echo "OK：内核符号齐备，kmod 可以打包出 ipk"
 
       - name: 编译目标包（仅编该包及其依赖，不生成固件镜像）
         id: compile
