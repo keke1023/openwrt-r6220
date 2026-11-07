@@ -96,29 +96,31 @@ done
 # ---------------------------------------------------------------------------
 # [0] 拆掉与本机型无关、却会让 kconfig 报 recursive dependency 的包
 #
-# 2026-11-07 run 42370054625：make defconfig 在两个环上报错，构建当场被判死。
-#   环1（helloworld 里的 passwall）：
-#     PACKAGE_iptables is selected by PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy
-#     → PACKAGE_firewall4 → PACKAGE_kmod-ipt-nat → PACKAGE_kmod-ipt-dnetmap
-#     → PACKAGE_iptables-mod-dnetmap → PACKAGE_iptables
-#   环2（telephony feed 的 baresip）：
-#     PACKAGE_baresip-mod-avcodec is selected by PACKAGE_baresip-mod-avformat
-#     ↔ PACKAGE_baresip-mod-avformat depends on PACKAGE_baresip-mod-avcodec
+# 2026-11-07 连续三次 defconfig 被环打断，逐个拆：
 #
-# 本机型两个都不用：passwall 在 config 里显式 =n（走 ssr-plus），baresip 属 telephony。
-# 环是 Kconfig 结构问题，跟选不选无关 —— 只要这些目录还在 package/ 下，
-# tmp/.config-package.in 就会生成同样的环，kconfig 顺手丢掉的 symbol 还不一定是谁。
-# 所以直接删目录，从源头消环，比事后猜「丢了哪几个包」可靠得多。
+# 环1（passwall，来自 padavanonly 的 luci feed，18.06-k5.4）：
+#     PACKAGE_iptables is selected by PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy
+#     → firewall4 → kmod-ipt-nat → kmod-ipt-dnetmap → iptables-mod-dnetmap → iptables
+# 环2（telephony feed 的 baresip，自选自己）：
+#     baresip-mod-avcodec ↔ baresip-mod-avformat
+# 环3（**结构性，与选不选无关**）：
+#     PACKAGE_firewall4 depends on !PACKAGE_kmod-ipt-nat     （fw4 的 CONFLICTS）
+#     PACKAGE_kmod-ipt-nat default ... if !PACKAGE_firewall4
+#
+# 环3 是这个分支自己的毛病：include/target.mk 里 DEFAULT_PACKAGES.router 是
+#   dnsmasq-full firewall iptables   ← 18.06 时代 fw3 + iptables 的组合，
+# 但主仓库里又混进了新版的 package/network/config/firewall4（nftables 方案）。
+# 两者在 Kconfig 里互斥，而我们的 ssr-plus 走 Iptables_Transparent_Proxy（要 iptables），
+# 三方一碰就成环，被吃掉的正是 luci-app-ssr-plus_Iptables_Transparent_Proxy。
+# 本机型不需要 fw4（fw3 才是这分支的默认），直接删目录。
+#
+# 环是 Kconfig 结构问题，跟「选不选中」无关 —— 只要目录还在 package/ 下就会生成，
+# 所以删目录比事后猜「丢了哪几个包」可靠。
 # ---------------------------------------------------------------------------
 echo "==> [0] 清理会造成 kconfig 循环依赖的无关包"
-# passwall 有两个可能的来源，两个都要覆盖：
-#   · padavanonly 的 luci feed → feeds install 后落在 package/feeds/luci/luci-app-passwall
-#     （run 42370662845 日志：Installing package 'luci-app-passwall' from luci）
-#   · fw876/helloworld 里若也有 → package/helloworld/luci-app-passwall
-# 只删前者的那一版（run 42370662845）只清掉了 baresip，环1 原封不动，
-# 且 kconfig 丢掉的正是 luci-app-ssr-plus_Iptables_Transparent_Proxy —— 确实会咬到我们。
 CLEANED=""
-for d in package/helloworld/luci-app-passwall \
+for d in package/network/config/firewall4 \
+         package/helloworld/luci-app-passwall \
          package/helloworld/luci-app-passwall2 \
          package/helloworld/luci-app-vssr \
          package/feeds/*/luci-app-passwall \
