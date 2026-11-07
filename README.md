@@ -61,19 +61,66 @@ dtsi 里对应 `hnat: hnat@1e100000 { compatible = "mediatek,mtk-hnat_v1"; statu
 | 脚本 | 时机 | 动作 |
 |---|---|---|
 | `hnat-part1.sh` | feeds update 前 | 断言源码含 mediateksdk（防配错仓库白编一小时）；helloworld pin 到 `a201839`（ssr-plus 187-2）；xray 前移到 v1.8.24；打 transport=raw / flow=none 四条补丁 |
-| `hnat-part2.sh` | feeds install 后 | dts 追加 `&hnat { status="okay"; }`；`CONFIG_NET_MEDIATEK_HNAT` **=m → =y**；清空设备 `DEVICE_PACKAGES`；默认 IP 改 192.168.9.1；注入 uci-defaults 关掉 fw3 flow_offloading |
+| `hnat-part2.sh` | feeds install 后 | dts 追加 `&hnat`（含 probe 必需属性）；保持 `CONFIG_NET_MEDIATEK_HNAT=m` 并确认 `KernelPackage/ramips_hnat` 在；写 `/etc/modules.d/60-mtkhnat` 与 `hnat-ctl`；清空设备 `DEVICE_PACKAGES`；默认 IP 改 192.168.9.1；uci-defaults 关 flow_offloading + 关 bridge-nf + conntrack 容量 |
 | `hnat-strip.sh` | defconfig 后 | 把无线 / USB / 存储 / ppp / 冗余 LuCI 压成 =n，导出 `/tmp/force-off.list` 给一致性校验 |
 
-### ⚠️ 最关键的一个坑：HNAT 必须内建
+### ⚠️ 两个会让加速「静默失效」的坑（都已修）
 
-`mt7621/config-5.10` 里写的是 `CONFIG_NET_MEDIATEK_HNAT=m`，但**整个仓库没有任何 KernelPackage 定义它**
-（`package/kernel/linux/modules/*.mk` 与 target Makefile 都查过）。OpenWrt 只会打包被 KernelPackage
-声明的模块，其余 `=m` 编出的 `.ko` 在打包阶段被静默丢弃 —— 结果是「编译全绿、固件里没有 mtkhnat.ko、
-硬件加速根本没生效」，且没有任何报错。
+**坑 1：`&hnat` 只写 `status="okay"` 不够。**
+`hnat_probe()` 里前两个读属性都是硬失败（`hnat.c:718` / `hnat.c:747`）：
 
-所以 `hnat-part2.sh` 强制改成 `=y` 内建。内建安全：`hnat.c` 用 `module_platform_driver()`，
-靠 dts 节点 probe，`y` 与 `m` 走同一条路径，不需要用户态 `insmod`。
-流水线在编译后还会检查 `vmlinux` 里是否存在 `hnat_probe` 符号，确认真的链接进去了。
+```c
+of_property_read_string(np, "mtketh-wan", &name);        // err<0 → return -EINVAL
+of_property_read_u32_index(np, "mtketh-max-gmac", 0, &val); // err<0 → return -EINVAL
+```
+
+少任一个，probe 直接失败：dmesg 没有有效报错、`/sys/kernel/debug/hnat` 不出现、转发全部走软件。
+所以追加的是完整节点：
+
+```
+&hnat {
+    mtketh-wan = "wan";      /* DSA 网口名，IS_WAN 按前缀匹配 */
+    mtketh-lan = "lan";      /* 前缀匹配 lan1-4 */
+    mtketh-ppd = "eth0";     /* DSA conduit；无外设时不影响转发 */
+    mtketh-max-gmac = <1>;   /* 4LAN+1WAN 全在内部 MT7530 上，只用一个 GMAC */
+    mtkdsa-wan-port = <0>;   /* 启用 DSA STAG 路径的开关（值取 wan 的端口号） */
+    status = "okay";
+};
+```
+
+`mtkdsa-wan-port` 缺了会按 swconfig 的 VLAN 规则生成转发表项，对 DSA 设备是错的。
+
+**坑 2：曾经误判「没有 KernelPackage，所以必须内建」。**
+早先只查了 `package/kernel/linux/modules/*.mk`，漏了 target 侧。实际
+`target/linux/ramips/modules.mk:137` 有：
+
+```makefile
+define KernelPackage/ramips_hnat
+  DEPENDS:=@TARGET_ramips +kmod-nf-conntrack
+  KCONFIG:= CONFIG_BRIDGE_NETFILTER=y CONFIG_NETFILTER_FAMILY_BRIDGE=y
+  FILES:= $(LINUX_DIR)/drivers/net/ethernet/mediateksdk/mtk_hnat/mtkhnat.ko
+endef
+```
+
+即 `kmod-ramips_hnat`。所以正确做法是保留 `=m`、在 config 里选这个包，而不是强制 `=y`。
+**保持模块形态的理由**：HNAT 绕过 netfilter 做 FOE 卸载，万一与 ssr-plus 的 TPROXY 冲突，
+`hnat-ctl stop`（`rmmod mtkhnat`）能立刻退回软件转发，本机 SSH 不受影响；内建就只能重刷。
+另外 KernelPackage 的 `KCONFIG` 还会带进 `BRIDGE_NETFILTER`——generic 里本来没有。
+
+流水线编译后有四道校验：内核 `.config` 是 `=m`、`mtkhnat.ko` 真编出来、`.manifest` 里有
+`kmod-ramips_hnat`、`/etc/modules.d/60-mtkhnat` 存在，外加 dts 五个属性逐项检查。
+
+### 运行期怎么确认加速真的在跑
+
+```sh
+hnat-ctl status
+# module   有 mtkhnat
+# probe    dmesg 有 "wan = wan / lan = lan / gmac num = 1 / wan dsa port = 0"
+# debugfs  /sys/kernel/debug/hnat 存在
+```
+
+再看 FOE 表有没有条目（有流量时）：`wc -l /sys/kernel/debug/hnat/all_entry`。
+全是空表说明只有驱动起来了、并没有真正卸载，需要回头查 STAG/端口配置。
 
 ### 刷机注意
 

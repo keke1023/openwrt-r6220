@@ -568,36 +568,66 @@ jobs:
             fi
             echo "--- 内核加速相关符号（$KC）---"
             grep -E '^CONFIG_(NET_MTKSDK|NET_MEDIATEK_HNAT|NET_DSA|NET_DSA_MT7530|NET_DSA_TAG_MTK|DEBUG_FS)=' "$KC" || true
-            for sym in CONFIG_NET_MTKSDK=y CONFIG_NET_MEDIATEK_HNAT=y CONFIG_NET_DSA_MT7530=y; do
+            for sym in CONFIG_NET_MTKSDK=y CONFIG_NET_MEDIATEK_HNAT=m CONFIG_NET_DSA_MT7530=y CONFIG_NET_DSA_TAG_MTK=y; do
               if ! grep -q "^${sym}$" "$KC"; then
                 echo "!! 失败：内核 .config 缺少 $sym"
-                echo "   排查：hnat-part2.sh [2] 是否把 CONFIG_NET_MEDIATEK_HNAT 从 =m 改成 =y"
-                echo "   注意：=m 不算通过 —— 该符号没有任何 KernelPackage 定义，.ko 不会进固件"
+                echo "   排查：CONFIG_NET_MEDIATEK_HNAT 必须是 =m —— 由 KernelPackage/ramips_hnat"
+                echo "         （target/linux/ramips/modules.mk）打包出 mtkhnat.ko；=y 内建无法 rmmod 回退"
                 exit 1
               fi
             done
-            echo "OK：HNAT 已内建（=y），MTKSDK 与 DSA_MT7530（STAG 依赖）齐备"
+            echo "OK：HNAT 以模块形态编入（=m），MTKSDK / DSA / MTK tag 齐备"
 
-            echo "--- 链接产物校验：确认 hnat 代码真的进了 vmlinux ---"
-            VML=$(ls -1 openwrt/build_dir/target-*/linux-*/linux-*/vmlinux 2>/dev/null | head -1)
-            if [ -n "$VML" ]; then
-              if grep -aq 'hnat_probe' "$VML"; then
-                echo "OK：vmlinux 内含 hnat_probe 符号（内建成功）"
+            echo "--- 模块产物校验：mtkhnat.ko 是否真的编出来 ---"
+            KO=$(ls -1 openwrt/build_dir/target-*/linux-*/linux-*/drivers/net/ethernet/mediateksdk/mtk_hnat/mtkhnat.ko 2>/dev/null | head -1)
+            if [ -n "$KO" ]; then
+              echo "OK：$KO（$(du -k "$KO" | cut -f1) KB）"
+            else
+              echo "!! 失败：没找到 mtkhnat.ko —— =m 的符号没有真正编成模块"
+              exit 1
+            fi
+
+            echo "--- 固件清单校验：kmod-ramips_hnat 是否进了镜像 ---"
+            MAN=$(ls -1 openwrt/bin/targets/*/*/*.manifest 2>/dev/null | head -1)
+            if [ -n "$MAN" ]; then
+              if grep -q '^kmod-ramips_hnat' "$MAN"; then
+                echo "OK：$(grep '^kmod-ramips_hnat' "$MAN")"
               else
-                echo "!! 失败：vmlinux 里找不到 hnat_probe —— HNAT 未被链接进内核"
+                echo "!! 失败：.manifest 里没有 kmod-ramips_hnat —— 驱动没进固件，刷进去也不会有加速"
+                echo "   排查：config-hnat 里 CONFIG_PACKAGE_kmod-ramips_hnat=y 是否被 defconfig 丢掉"
                 exit 1
               fi
             else
-              echo "!! 警告：未找到 vmlinux，跳过链接产物校验"
+              echo "!! 警告：未找到 .manifest，跳过打包校验"
             fi
 
-            echo "--- 设备树校验 ---"
-            if grep -q '^&hnat {' openwrt/target/linux/ramips/dts/mt7621_iptime_a3004ns-dual.dts; then
-              echo "OK：设备树已启用 &hnat 节点"
-            else
-              echo "!! 失败：dts 里没有 &hnat 节点（hnat-part2.sh [1] 未执行？）"
+            echo "--- 开机加载校验：/etc/modules.d 里要有 mtkhnat ---"
+            # 先查源码树（hnat-part2.sh 产出的确定性位置），再在暂存 rootfs 里复核
+            SRC_MD=openwrt/files/etc/modules.d/60-mtkhnat
+            if [ ! -f "$SRC_MD" ] || ! grep -q '^mtkhnat' "$SRC_MD"; then
+              echo "!! 失败：$SRC_MD 缺失或内容不含 mtkhnat，模块不会在开机时加载"
               exit 1
             fi
+            echo "OK：$SRC_MD -> $(cat "$SRC_MD")"
+            MD=$(ls -1 openwrt/build_dir/target-*/root-*/etc/modules.d/*mtkhnat* 2>/dev/null | head -1)
+            if [ -n "$MD" ]; then
+              echo "OK：已并入暂存 rootfs（$MD）"
+            else
+              echo "   (提示) 未在 build_dir 暂存 rootfs 里找到，可能 files/ 在镜像阶段才合并"
+            fi
+
+            echo "--- 设备树校验（status 只是其一，probe 还硬性要求两个属性）---"
+            DTSF=openwrt/target/linux/ramips/dts/mt7621_iptime_a3004ns-dual.dts
+            for p in '^&hnat {' 'mtketh-wan' 'mtketh-max-gmac' 'mtkdsa-wan-port' 'status = "okay"'; do
+              if grep -q "$p" "$DTSF"; then
+                echo "OK：$p"
+              else
+                echo "!! 失败：dts 缺少 $p"
+                echo "   hnat.c:718/747 对 mtketh-wan、mtketh-max-gmac 是 return -EINVAL（硬失败）；"
+                echo "   少了它们 probe 直接失败，dmesg 不报错、debugfs 不出现、加速静默不生效。"
+                exit 1
+              fi
+            done
 
             echo "--- 设备包校验（无线/USB 必须已从 DEVICE_PACKAGES 移除）---"
             DP=$(sed -n '/define Device\/iptime_a3004ns-dual/,/^endef/p' openwrt/target/linux/ramips/image/mt7621.mk | grep 'DEVICE_PACKAGES' | head -1)
