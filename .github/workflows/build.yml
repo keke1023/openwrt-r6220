@@ -11,6 +11,10 @@ on:
         description: 'immortalwrt 源码分支（克隆时 -b 参数）。默认 openwrt-23.05；可填 openwrt-18.06-k5.4 等旧分支'
         required: false
         default: 'openwrt-23.05'
+      source_repo:
+        description: '源码仓库（owner/repo）。留空=immortalwrt 官方；填 padavanonly/immortalwrt 走 MT7621 硬件 NAT 线（配置目录自动切 config-hnat）'
+        required: false
+        default: ''
 #  push:
 #    branches: [master]      # 如需 push 自动触发编译，取消注释这两行即可
 #  schedule:
@@ -43,11 +47,23 @@ jobs:
       - uses: actions/checkout@v4
       - id: gen
         run: |
-          # 分支隔离：按所选源码分支选择机型配置目录，避免 18.06 等旧分支的 config 污染 23.05
+          # 分支隔离：按「源码仓库 + 分支」选择机型配置目录，避免不同源码树的 config 互相污染。
+          #   padavanonly/immortalwrt → config-hnat（MTK SDK 驱动 + HNAT，结构与官方树不同）
+          #   openwrt-18.06* / 18.06-k* → config-18.06
+          #   其它（21.02/23.05/master）→ config
           SRC="${{ inputs.source_branch || env.REPO_BRANCH }}"
-          case "$SRC" in
-            openwrt-18.06*|18.06-k*) CFG_DIR="config-18.06" ;;
-            *) CFG_DIR="config" ;;
+          REPO_IN="${{ inputs.source_repo }}"
+          case "$REPO_IN" in
+            *padavanonly*)
+              CFG_DIR="config-hnat"
+              echo "!! 硬件加速线：源码 = $REPO_IN@$SRC（MTK SDK 驱动 + MT7621 HNAT）"
+              ;;
+            *)
+              case "$SRC" in
+                openwrt-18.06*|18.06-k*) CFG_DIR="config-18.06" ;;
+                *) CFG_DIR="config" ;;
+              esac
+              ;;
           esac
           echo "源码分支：$SRC => 机型配置目录：$CFG_DIR"
           ls -1 "$CFG_DIR"/*.config
@@ -128,8 +144,18 @@ jobs:
           fi
           echo "OK：编译依赖安装完成"
 
-      - name: 克隆源码（分支由 source_branch 输入决定，默认 openwrt-23.05）
-        run: git clone --depth 1 $REPO_URL -b "${{ inputs.source_branch || env.REPO_BRANCH }}" openwrt
+      - name: 克隆源码（仓库由 source_repo 决定，分支由 source_branch 决定）
+        run: |
+          REPO_IN="${{ inputs.source_repo }}"
+          if [ -z "$REPO_IN" ]; then
+            REPO_URL="${{ env.REPO_URL }}"
+          else
+            REPO_URL="https://github.com/${REPO_IN}.git"
+          fi
+          BRANCH="${{ inputs.source_branch || env.REPO_BRANCH }}"
+          echo "==> 源码：$REPO_URL"
+          echo "==> 分支：$BRANCH"
+          git clone --depth 1 "$REPO_URL" -b "$BRANCH" openwrt
 
       # ---------------------------------------------------------------------
       # 删除过时的 ipq40xx 内核补丁 401（避免打补丁阶段失败）
@@ -172,8 +198,16 @@ jobs:
           TARGET_CONFIG: ${{ matrix.config }}
         run: |
           cd openwrt
-          chmod +x ../$DIY_P1_SH
-          ../$DIY_P1_SH
+          # config-hnat 线用专用脚本：它先把「源码确实是 padavanonly（含 mediateksdk）」
+          # 断言一遍，再做 helloworld pin 与 xray 前移，避免误用官方树编出没有 HNAT 的固件
+          if [ "${{ matrix.cfgdir }}" = "config-hnat" ]; then
+            S="../scripts/hnat-part1.sh"
+            echo "==> 硬件加速线：使用 $S"
+          else
+            S="../$DIY_P1_SH"
+          fi
+          chmod +x "$S"
+          bash "$S"
 
       - name: 更新并安装 feeds
         env:
@@ -196,8 +230,16 @@ jobs:
           TARGET_CONFIG: ${{ matrix.config }}
         run: |
           cd openwrt
-          chmod +x ../$DIY_P2_SH
-          bash ../$DIY_P2_SH
+          # config-hnat 线：改造点完全不同（启用 hnat 节点、HNAT 内建、清 DEVICE_PACKAGES、
+          # 关 fw3 flow_offloading），与 18.06 那条「给 ralink 驱动开 --hw」的路径不通用
+          if [ "${{ matrix.cfgdir }}" = "config-hnat" ]; then
+            S="../scripts/hnat-part2.sh"
+            echo "==> 硬件加速线：使用 $S"
+          else
+            S="../$DIY_P2_SH"
+          fi
+          chmod +x "$S"
+          bash "$S"
 
       - name: 诊断 ssr-plus 来源（确认 helloworld 版生效）
         run: |
@@ -234,8 +276,13 @@ jobs:
           TARGET_CONFIG: ${{ matrix.config }}
         run: |
           cd openwrt
-          chmod +x ../scripts/diy-strip.sh
-          bash ../scripts/diy-strip.sh
+          if [ "${{ matrix.cfgdir }}" = "config-hnat" ]; then
+            S="../scripts/hnat-strip.sh"
+          else
+            S="../scripts/diy-strip.sh"
+          fi
+          chmod +x "$S"
+          bash "$S"
 
       - name: 配置一致性校验（kconfig 解析，防剔除项被依赖/select 拉回）
         env:
@@ -252,7 +299,12 @@ jobs:
           make prepare-tmpinfo >/dev/null 2>&1 || true
 
           echo "==> 索引就绪后再跑一次裁剪（幂等，且此时才能稳定压住 default y）"
-          bash ../scripts/diy-strip.sh || exit 1
+          if [ "${{ matrix.cfgdir }}" = "config-hnat" ]; then
+            STRIP="../scripts/hnat-strip.sh"
+          else
+            STRIP="../scripts/diy-strip.sh"
+          fi
+          bash "$STRIP" || exit 1
 
           echo "==> 用 kconfig 解析 .config，检查剔除项是否被拉回"
           cp .config /tmp/resolved.config
@@ -503,8 +555,59 @@ jobs:
       - name: 体积预算检查（16MB 小闪存机型）
         if: steps.compile.outputs.status == 'success'
         run: |
-          # ── 硬件 offload 落地校验（本机型强制启用，缺一项就直接失败）──
-          if echo "${{ matrix.config }}" | grep -qE '^(a3004ns-dual|k2p|wr1200js)\.config$'; then
+          # ── 硬件加速落地校验 ──
+          # 两条线的加速机制完全不同，必须分开验：
+          #   config-hnat  → MTK SDK 的 HNAT（FOE 表 + STAG），不经过 nf_flow_table
+          #   其余         → ralink mtk_offload / nf_flow_table 硬件档（FLOWOFFLOAD --hw）
+          if [ "${{ matrix.cfgdir }}" = "config-hnat" ]; then
+            echo "==> HNAT 落地校验（MTK SDK 驱动线）"
+            KC=$(ls -1 openwrt/build_dir/target-*/linux-*/linux-*/.config 2>/dev/null | head -1)
+            if [ -z "$KC" ]; then
+              echo "!! 失败：未找到内核 .config，无法确认 HNAT 是否编入"
+              exit 1
+            fi
+            echo "--- 内核加速相关符号（$KC）---"
+            grep -E '^CONFIG_(NET_MTKSDK|NET_MEDIATEK_HNAT|NET_DSA|NET_DSA_MT7530|NET_DSA_TAG_MTK|DEBUG_FS)=' "$KC" || true
+            for sym in CONFIG_NET_MTKSDK=y CONFIG_NET_MEDIATEK_HNAT=y CONFIG_NET_DSA_MT7530=y; do
+              if ! grep -q "^${sym}$" "$KC"; then
+                echo "!! 失败：内核 .config 缺少 $sym"
+                echo "   排查：hnat-part2.sh [2] 是否把 CONFIG_NET_MEDIATEK_HNAT 从 =m 改成 =y"
+                echo "   注意：=m 不算通过 —— 该符号没有任何 KernelPackage 定义，.ko 不会进固件"
+                exit 1
+              fi
+            done
+            echo "OK：HNAT 已内建（=y），MTKSDK 与 DSA_MT7530（STAG 依赖）齐备"
+
+            echo "--- 链接产物校验：确认 hnat 代码真的进了 vmlinux ---"
+            VML=$(ls -1 openwrt/build_dir/target-*/linux-*/linux-*/vmlinux 2>/dev/null | head -1)
+            if [ -n "$VML" ]; then
+              if grep -aq 'hnat_probe' "$VML"; then
+                echo "OK：vmlinux 内含 hnat_probe 符号（内建成功）"
+              else
+                echo "!! 失败：vmlinux 里找不到 hnat_probe —— HNAT 未被链接进内核"
+                exit 1
+              fi
+            else
+              echo "!! 警告：未找到 vmlinux，跳过链接产物校验"
+            fi
+
+            echo "--- 设备树校验 ---"
+            if grep -q '^&hnat {' openwrt/target/linux/ramips/dts/mt7621_iptime_a3004ns-dual.dts; then
+              echo "OK：设备树已启用 &hnat 节点"
+            else
+              echo "!! 失败：dts 里没有 &hnat 节点（hnat-part2.sh [1] 未执行？）"
+              exit 1
+            fi
+
+            echo "--- 设备包校验（无线/USB 必须已从 DEVICE_PACKAGES 移除）---"
+            DP=$(sed -n '/define Device\/iptime_a3004ns-dual/,/^endef/p' openwrt/target/linux/ramips/image/mt7621.mk | grep 'DEVICE_PACKAGES' | head -1)
+            echo "   $DP"
+            if echo "$DP" | grep -qE 'kmod-mt76|kmod-usb'; then
+              echo "!! 失败：DEVICE_PACKAGES 里仍有无线/USB 包，会强制拉进固件"
+              exit 1
+            fi
+            echo "OK：DEVICE_PACKAGES 已清空"
+          elif echo "${{ matrix.config }}" | grep -qE '^(a3004ns-dual|k2p|wr1200js)\.config$'; then
             KC=$(ls -1 openwrt/build_dir/target-*/linux-*/linux-*/.config 2>/dev/null | head -1)
             if [ -n "$KC" ]; then
               echo "==> 内核 flowtable 符号（$KC）"

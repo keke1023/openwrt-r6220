@@ -13,11 +13,86 @@
 .
 ├── .github/workflows/build.yml   # Actions 编译流程
 ├── config/r6220.config           # 机型与插件配置（.config）
+├── config-18.06/                 # 18.06-k5.4 分支专用配置
+├── config-hnat/                  # padavanonly master 专用配置（MT7621 硬件 NAT）
 ├── scripts/diy-part1.sh          # 编译前：添加第三方源
-└── scripts/diy-part2.sh          # 编译前：改默认管理 IP 等
+├── scripts/diy-part2.sh          # 编译前：改默认管理 IP 等
+├── scripts/hnat-part1.sh         # 硬件加速线：源码断言 + ssr-plus pin + xray 前移
+├── scripts/hnat-part2.sh         # 硬件加速线：启用 HNAT / 清 DEVICE_PACKAGES
+└── scripts/hnat-strip.sh         # 硬件加速线：defconfig 后剔除无线与 USB
 ```
 
 > **多机型**：往 `config/` 丢任意 `xxx.config` 即可自动加入编译矩阵，无需改动 workflow。
+> `config-18.06/` 与 `config-hnat/` 同理，由所选源码仓库/分支自动选中对应目录。
+
+## 硬件加速线：MT7621 HNAT（padavanonly/immortalwrt）
+
+`config-hnat/a3004ns-dual.config` 是给 **A3004NS-dual（16MB SPI NOR）** 做「纯有线 + 硬件 NAT + ssr-plus」的配置，
+源码用 `padavanonly/immortalwrt` 的 **master** 分支。
+
+### 触发方式
+
+Actions → Run workflow，填三个参数：
+
+| 参数 | 值 |
+|---|---|
+| `source_repo` | `padavanonly/immortalwrt` |
+| `source_branch` | `master` |
+| `targets` | `a3004ns` |
+
+`source_repo` 只要含 `padavanonly`，配置目录就自动切到 `config-hnat/`，
+三个 DIY 步骤也自动换成 `scripts/hnat-part*.sh`，与官方树的流水线互不干扰。
+
+### 为什么必须换源码
+
+MT7621 硬件上确实有 HNAT（PPE，寄存器 `0x1e100000`），但**官方 OpenWrt 的 `mt7621.dtsi` 里没有这个节点**。
+只有 padavanonly 这类分支把 MTK SDK 的整套以太网驱动搬了进来：
+
+```
+target/linux/ramips/files/drivers/net/ethernet/mediateksdk/
+├── mtk_eth_soc.c              # SDK 版 MAC 驱动（顶掉主线同名驱动）
+└── mtk_hnat/                  # hnat.c / hnat_nf_hook.c / hnat_stag.c(STAG=MT7621 专有)
+```
+
+dtsi 里对应 `hnat: hnat@1e100000 { compatible = "mediatek,mtk-hnat_v1"; status = "disabled"; }`。
+
+### 三个脚本各做什么
+
+| 脚本 | 时机 | 动作 |
+|---|---|---|
+| `hnat-part1.sh` | feeds update 前 | 断言源码含 mediateksdk（防配错仓库白编一小时）；helloworld pin 到 `a201839`（ssr-plus 187-2）；xray 前移到 v1.8.24；打 transport=raw / flow=none 四条补丁 |
+| `hnat-part2.sh` | feeds install 后 | dts 追加 `&hnat { status="okay"; }`；`CONFIG_NET_MEDIATEK_HNAT` **=m → =y**；清空设备 `DEVICE_PACKAGES`；默认 IP 改 192.168.9.1；注入 uci-defaults 关掉 fw3 flow_offloading |
+| `hnat-strip.sh` | defconfig 后 | 把无线 / USB / 存储 / ppp / 冗余 LuCI 压成 =n，导出 `/tmp/force-off.list` 给一致性校验 |
+
+### ⚠️ 最关键的一个坑：HNAT 必须内建
+
+`mt7621/config-5.10` 里写的是 `CONFIG_NET_MEDIATEK_HNAT=m`，但**整个仓库没有任何 KernelPackage 定义它**
+（`package/kernel/linux/modules/*.mk` 与 target Makefile 都查过）。OpenWrt 只会打包被 KernelPackage
+声明的模块，其余 `=m` 编出的 `.ko` 在打包阶段被静默丢弃 —— 结果是「编译全绿、固件里没有 mtkhnat.ko、
+硬件加速根本没生效」，且没有任何报错。
+
+所以 `hnat-part2.sh` 强制改成 `=y` 内建。内建安全：`hnat.c` 用 `module_platform_driver()`，
+靠 dts 节点 probe，`y` 与 `m` 走同一条路径，不需要用户态 `insmod`。
+流水线在编译后还会检查 `vmlinux` 里是否存在 `hnat_probe` 符号，确认真的链接进去了。
+
+### 刷机注意
+
+- **这是 DSA 架构**（`$(Device/dsa-migration)`），不是 18.06 的 swconfig：网口是 `wan` / `lan1-4`
+  独立网口，没有 switch/vlan 配置段。**sysupgrade 时建议加 `-n`**（不保留配置），否则旧的
+  `network` / `firewall` 配置会错乱。
+- 默认 LAN 地址 `192.168.9.1`（上游路由在 192.168.1.1，避免冲突）。
+- 无无线驱动、无 USB 驱动：这台只能当纯有线网关/旁路由。
+- 编译后验证硬件加速是否真的跑起来：`cat /sys/kernel/debug/hnat/hnat_entry`（需要 debugfs 已挂载）。
+
+### 与 18.06 线的关系
+
+两条线的加速机制**不是一回事**：
+
+| | 18.06-k5.4 线 | 本 HNAT 线 |
+|---|---|---|
+| 实现 | ralink `mtk_offload.c` → 注册进 `nf_flow_table` 硬件档 | MTK SDK `mtk_hnat` 自己的 FOE 表 + STAG |
+| 下发 | fw3 的 `FLOWOFFLOAD --hw` | dts probe 后自动接管，无需 iptables 规则 |
+| 是否共存 | 与 `kmod-nf-flow` 配套 | **必须关掉 flow_offloading**，否则两套抢同一条路径 |
 
 ## 使用方法
 
