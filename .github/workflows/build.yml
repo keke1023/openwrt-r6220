@@ -390,7 +390,7 @@ jobs:
           # 按机型分叉：a3004ns 是纯有线（无线必须全灭）；k2p 要开源无线（必须齐备）。
           CFG="${{ matrix.config }}"
           if echo "$CFG" | grep -qE '^a3004ns-dual\.config$'; then
-            BAD=$(grep -E '^CONFIG_PACKAGE_(kmod-usb[^=]*|kmod-mt76[a-z0-9]*|kmod-mac80211|kmod-cfg80211|wpad[a-z0-9_.-]*)=(y|m)$' /tmp/resolved.config || true)
+            BAD=$(grep -E '^CONFIG_PACKAGE_(kmod-usb[^=]*|kmod-mt76[a-z0-9]*|kmod-mac80211|kmod-cfg80211|wpad[a-z0-9_.-]*|hostapd[a-z0-9_.-]*|wireless-tools|swconfig|prism54-firmware|p54-[a-z]+-firmware|mtkhqos_util|luci-app-eqos-mtk|luci-app-mwan3helper-chinaroute|ebtables|kmod-ebtables[a-z0-9-]*)=(y|m)$' /tmp/resolved.config || true)
             if [ -n "$BAD" ]; then
               echo "!! 失败：以下被剔除的包在 kconfig 解析后又出现了（说明有包 select / DEVICE_PACKAGES 拉回）："
               echo "$BAD"
@@ -631,7 +631,11 @@ jobs:
 
             echo "--- 设备树校验（status 只是其一，probe 还硬性要求两个属性）---"
             DTSF=openwrt/target/linux/ramips/dts/mt7621_iptime_a3004ns-dual.dts
-            for p in '^&hnat {' 'mtketh-wan = "wan"' 'mtketh-lan = "lan"' 'mtketh-ppd = "eth0"' 'mtketh-max-gmac = <1>' 'mtkdsa-wan-port = <' 'status = "okay"'; do
+            # 注意：下面用 grep -F（固定字符串，避免 < > { " 被正则解释），
+            # 所以模式里**不能出现 ^ $ . * 这类正则记号** —— 它们会被当字面字符：
+            # run 42372404613 就是把 '^&hnat {' 配 -F，^ 成了字面量，第一个模式必然不匹配，
+            # 明明 dts 里六项齐全（DIY-P2 已逐项打印 OK）却在这一步判死。
+            for p in '&hnat {' 'mtketh-wan = "wan"' 'mtketh-lan = "lan"' 'mtketh-ppd = "eth0"' 'mtketh-max-gmac = <1>' 'mtkdsa-wan-port = <' 'status = "okay"'; do
               if grep -qF "$p" "$DTSF"; then
                 echo "OK：$p"
               else
