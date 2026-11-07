@@ -4,38 +4,56 @@
 # 把「padavanonly/immortalwrt @ master」改造成「A3004NS-dual + MT7621 硬件 NAT +
 # 纯有线 + ssr-plus」的形态。四处改动：
 #
-#   [1] 设备树启用 hnat 节点，并补齐 hnat_probe() 强制要求的属性
+#   [1] 设备树启用 hnat 节点（DSA 变体：mtketh-wan="wan" + mtkdsa-wan-port），不写 ext-devices
 #   [2] 内核配置确认 HNAT 为 =m（模块），由 KernelPackage/ramips_hnat 打包进固件
 #   [3] 摘掉 mt7621.mk 里 A3004NS 的 DEVICE_PACKAGES（无线 / USB）
 #   [4] 默认管理地址改 192.168.9.1，关 fw3 flow_offloading，写 offload 相关 sysctl
 #
 # ============================================================================
-# 关于 [1] 为什么不能只写 status="okay"
+# 关于 [1] 为什么是 DSA 写法，而不是照抄 jcg_q20 的 &hnat 段
 # ============================================================================
-#   hnat.c 的 hnat_probe() 里前两个读属性都是**硬失败**：
-#       hnat.c:718  of_property_read_string(np, "mtketh-wan", &name);   err<0 → return -EINVAL
-#       hnat.c:747  of_property_read_u32_index(np, "mtketh-max-gmac", 0, &val); err<0 → return -EINVAL
-#   只要这两个缺一个，probe 直接失败：dmesg 一句 "mtk-hnat: probe failed"，
-#   /sys/kernel/debug/hnat 不存在，转发全走软件路径，而且**没有任何其它报错**。
-#   其余属性有默认值，但默认值对本案是错的（默认 lan="eth0"、max-gmac 无默认）。
+#   原版 mt7621_iptime_a3004ns-dual.dts 里没有任何 hnat 引用：hnat 节点定义在
+#   mt7621.dtsi（compatible = "mediatek,mtk-hnat_v1"，reg 0x1e100000，status="disabled"），
+#   机型 dts 不写 &hnat 就永远是 disabled，驱动根本不 probe。所以必须由本脚本追加。
 #
-#   属性取值依据（不是猜的）：
-#     · 本机是 DSA：dts 里 &switch0 的 port@0 label="wan"、port@1..4 label="lan1..4"
-#     · hnat.h:1139-1142 用**前缀匹配**判 DSA 网口：
-#           IS_DSA_LAN(dev)  = !strncmp(dev->name, "lan", 3)
-#           IS_DSA_WAN(dev)  = !strncmp(dev->name, "wan", 3)
-#           IS_WAN(dev)      = !strncmp(dev->name, hnat_priv->wan, strlen(...))
-#           IS_LAN(dev)      = !strncmp(dev->name, hnat_priv->lan, strlen(...))
-#       所以 mtketh-wan="wan"、mtketh-lan="lan" 就能同时匹配 wan 与 lan1-4。
-#     · hnat.h:1107  IS_GMAC1_MODE = (gmac_num == 1) —— 本机 4LAN+1WAN 全挂在内部
-#       MT7530 上，只用 gmac0 一个口，故 max-gmac = <1>。
-#     · mtkdsa-wan-port 只是**开关**（hnat.h:1166 hnat_dsa_is_enable() 判 != 0xff）：
-#       有它才会走 hnat_dsa_fill_stag()，让 FE 按 DSA 端口号生成 STAG；
-#       没有它则按 swconfig 的 vpm/vlan 规则处理 —— 对 DSA 设备是错的。
-#       值取 wan 的 DSA 端口号（port@0 → 0），实际只用于 dmesg 打印。
-#     · mtketh-ppd 在无外设（无 wifi/USB 网卡）时只在 do_hnat_ext_to_ge() 里用到，
-#       那条路要求 ext-devices 存在；本机不写 ext-devices，故它不影响转发。
-#       仍填 eth0（DSA 的 conduit），避免 g_ppdev 为 NULL 时的空指针疑虑。
+#   但 q20 的写法不能直接抄 —— 它是双 gmac 的 swconfig 机型：
+#       q20:     mtketh-wan="eth1"  mtketh-lan="eth0"  max-gmac=<2>   （wan 走独立 gmac1）
+#   本机 4LAN+1WAN 全挂在内部 MT7530 上，只有一个 gmac0（wan 也在 switch 上），
+#   照抄会把 wan 认成 eth1，probe 能过但永远匹配不到流量。
+#
+#   分支内 13 个启用 HNAT 的机型全是 swconfig（都挂 &gsw 并删 switch0 的 compatible），
+#   且**没有一个**用 mtkdsa-wan-port —— 也就是说 DSA 路径在本分支零先例。
+#   其中与本机同构（wan 在 switch 上、单 gmac0）的是 newifi-d2 / ghl-r-001：
+#       newifi-d2:  mtketh-wan="eth0.2"  mtketh-lan="eth0"  mtketh-ppd="eth0.1"  max-gmac=<1>
+#   它们的取值是 swconfig 的 VLAN 子接口名，不是 DSA 的 label。
+#
+#   本机仍选 DSA 而不是切回 swconfig，因为切换代价会直接断网：
+#     · 02_network 里没有 iptime,a3004ns-dual 条目，走默认分支
+#         ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "wan"
+#       —— 这组名字正是 DSA 的 label。改成 swconfig 后只有 eth0.1/eth0.2，
+#       默认配置会指向不存在的接口，首次启动直接失联。
+#     · mt7621.mk 里该机型带 $(Device/dsa-migration)，官方定位就是 DSA 设备。
+#
+#   DSA 路径在驱动里是完整的（不是猜的）：
+#     · hnat_probe 读属性（hnat.c:718/725/739/747/756）：
+#         mtketh-wan / mtketh-lan 是**字符串前缀**，不是完整网口名：
+#           IS_LAN(dev) = !strncmp(dev->name, hnat_priv->lan, strlen(...))   hnat.h
+#         DSA 下 LAN 口是 lan1..lan4、WAN 是 wan，故填 "lan" / "wan" 即可命中全部。
+#     · hnat.c:756 读 mtkdsa-wan-port → wan_dsa_port；!= 0xff 即 hnat_dsa_is_enable()
+#       为真（hnat.h:1166），才会在 hnat_nf_hook.c:1523/1536 调 hnat_dsa_fill_stag()。
+#     · hnat_stag.c 用 **slave netdev 的 of_node 的 reg 属性**取 DSA 端口号，
+#       sp_tag = BIT(port_index)；所以这个值必须等于 wan 在 switch 里的 port@N 的 N。
+#       本机 wan = port@0 → <0>（下面会从原 dts 里解析，改板型也不怕写错）。
+#     · mtk_eth_soc.c:2669 hw_init 里 netdev_uses_dsa(dev) 为真时置
+#       MTK_CDMQ_STAG_EN | MTK_CDMP_STAG_EN —— FE 才会解析 DSA 的 special tag。
+#     · max-gmac=<1>：hnat.h:1107 IS_GMAC1_MODE = (gmac_num == 1)，本机只有 gmac0。
+#     · mtketh-ppd="eth0"：DSA 的 conduit 设备名（q20 也填 eth0）。它只用于
+#       g_ppdev = dev_get_by_name(...)，不参与 DSA 的端口判定。
+#
+#   ext-devices 整个不写（q20 和其余 12 个机型写的都是 wlan0/ra0/rai0… 这类无线接口）：
+#     · 它只对"非 gmac / 非 DSA"的网口做 ext_if 注册，本机无无线、无 USB 网卡；
+#     · 缺该属性是安全的：hnat.c 用 of_find_property() 取到 NULL 后交给
+#       of_prop_next_string()，后者第一行就是 if (!prop) return NULL（5.10 同样有这个判空）。
 #
 # ============================================================================
 # 关于 [2] 为什么是「确认 =m」而不是「强制 =y」（这是上一版写错的地方）
@@ -76,38 +94,65 @@ done
 # ---------------------------------------------------------------------------
 # [1] 设备树：启用 hnat 节点 + 补齐 hnat_probe 必需的属性
 # ---------------------------------------------------------------------------
-echo "==> [1] 设备树启用 HNAT（含必需属性）"
-if grep -q '^&hnat {' "$DTS"; then
-  echo "    &hnat 节点已存在，跳过（幂等）"
-else
-  cat >> "$DTS" <<'DTS_EOF'
+echo "==> [1] 设备树启用 HNAT（DSA 变体，不带 ext-devices）"
 
-/* MT7621 硬件 NAT（HNAT/PPE）
- * mtketh-wan / mtketh-max-gmac 是 hnat_probe() 的硬性要求，缺任一即 probe 失败；
- * mtkdsa-wan-port 是「启用 DSA STAG 路径」的开关，缺了会按 swconfig 的 VLAN 规则处理。
- * 本机 4LAN+1WAN 全部挂在内部 MT7530 上（DSA），wan 是 port@0。
+# wan 的 DSA 端口号从原 dts 解析：wan 的 label 上方最近的 port@N 就是答案。
+# 解析不到时退回 0（A3004NS-dual 当前就是 port@0），并明确告警。
+WAN_DPORT=$(grep -B6 'label = "wan"' "$DTS" | grep -o 'port@[0-9]\+' | tail -1 | tr -dc '0-9')
+if [ -z "$WAN_DPORT" ]; then
+  WAN_DPORT=0
+  echo "   (注意) 未能从 dts 解析 wan 的 port@N，退回 0 —— 请手工确认 &switch0 里 wan 的端口号"
+fi
+echo "    wan 的 DSA 端口号：port@${WAN_DPORT}"
+
+if grep -q '^&hnat {' "$DTS"; then
+  echo "    &hnat 节点已存在，跳过追加（幂等），下面按 DSA 取值逐项核对"
+else
+  cat >> "$DTS" <<DTS_EOF
+
+/* MT7621 硬件 NAT（HNAT/PPE），DSA 形态
+ * mtketh-wan / mtketh-lan 是**名字前缀**：DSA 下命中 wan、lan1..lan4
+ * mtketh-max-gmac=<1>：本机只有 gmac0，4LAN+1WAN 全在内部 MT7530 上
+ * mtkdsa-wan-port=<${WAN_DPORT}>：让驱动走 hnat_dsa_fill_stag()，否则按 swconfig 的
+ *   vlan 规则填 STAG，DSA 设备会转发错端口
+ * 不写 ext-devices：无无线/无 USB 网卡，该属性只用于注册外部接口
  */
 &hnat {
 	mtketh-wan = "wan";
 	mtketh-lan = "lan";
 	mtketh-ppd = "eth0";
 	mtketh-max-gmac = <1>;
-	mtkdsa-wan-port = <0>;
+	mtkdsa-wan-port = <${WAN_DPORT}>;
 	status = "okay";
 };
 DTS_EOF
   echo "    已追加 &hnat {...}（wan/lan/ppd/max-gmac/mtkdsa-wan-port/status）"
 fi
 
-# 四个必需属性逐项回读：任何一个没落地，都不必继续编了
-for p in 'mtketh-wan' 'mtketh-max-gmac' 'mtkdsa-wan-port' 'status = "okay"'; do
-  if grep -q "$p" "$DTS"; then
-    echo "    OK：$p"
+# 逐项回读：每一项都有明确后果，缺一项就不必继续编了
+DTS_FAIL=0
+need_dts() {
+  if grep -qF "$1" "$DTS"; then
+    echo "    OK：$1"
   else
-    echo "!! 错误：&hnat 节点缺 $p —— hnat_probe() 会失败，硬件加速不会生效"
-    exit 1
+    echo "!! 错误：dts 里找不到 [$1]"
+    echo "         $2"
+    DTS_FAIL=1
   fi
-done
+}
+need_dts 'mtketh-wan = "wan"'        'hnat.c:718 读不到即 return -EINVAL，probe 直接失败（静默，无加速）'
+need_dts 'mtketh-lan = "lan"'        'DSA 下 LAN 是 lan1..lan4，前缀写成 eth0 会一个都匹配不到'
+need_dts 'mtketh-ppd = "eth0"'       'ppd 缺省也是 eth0，写出来是为了 dmesg/调试时能一眼看到'
+need_dts 'mtketh-max-gmac = <1>'     'hnat.c:747 读不到即 return -EINVAL；值错会让 IS_GMAC1_MODE 取反'
+need_dts "mtkdsa-wan-port = <${WAN_DPORT}>" '缺它则 wan_dsa_port=0xff，走 swconfig 的 VLAN/STAG 路径，DSA 下端口必错'
+need_dts 'status = "okay"'           'hnat 在 mt7621.dtsi 里默认 disabled，不改就永远不 probe'
+
+if grep -qE 'ext-devices[[:space:]]*=' "$DTS"; then
+  echo "   (注意) dts 里出现 ext-devices 属性 —— 本机无无线，若里面是 wlan0/ra0 之类，会注册永不存在的接口"
+fi
+
+[ "$DTS_FAIL" = 0 ] || { echo "!! 设备树不符合 HNAT DSA 要求，中止"; exit 1; }
+echo "    OK：&hnat 六项齐备，且未引用无线 ext-devices"
 
 # ---------------------------------------------------------------------------
 # [2] 内核配置：HNAT 必须是 =m，并由 KernelPackage/ramips_hnat 打包
@@ -169,7 +214,8 @@ status|*)
 	echo "== module =="
 	grep -E '^mtkhnat ' /proc/modules || echo "  (not loaded)"
 	echo "== probe(dmesg) =="
-	dmesg | grep -iE 'mtk-hnat|mtkhnat|wan = |lan = |gmac num' | tail -8
+	dmesg | grep -iE 'mtk-hnat|mtkhnat|wan = |lan = |ppd = |gmac num|dsa port' | tail -10
+	echo "  ^ 有 'wan dsa port = N' 才说明走的是 DSA 路径（没有则 wan_dsa_port=0xff，STAG 会按 swconfig 规则填）"
 	echo "== debugfs =="
 	if [ -d "$d" ]; then
 		echo "  $d 存在"

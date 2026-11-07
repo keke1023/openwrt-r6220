@@ -618,16 +618,23 @@ jobs:
 
             echo "--- 设备树校验（status 只是其一，probe 还硬性要求两个属性）---"
             DTSF=openwrt/target/linux/ramips/dts/mt7621_iptime_a3004ns-dual.dts
-            for p in '^&hnat {' 'mtketh-wan' 'mtketh-max-gmac' 'mtkdsa-wan-port' 'status = "okay"'; do
-              if grep -q "$p" "$DTSF"; then
+            for p in '^&hnat {' 'mtketh-wan = "wan"' 'mtketh-lan = "lan"' 'mtketh-ppd = "eth0"' 'mtketh-max-gmac = <1>' 'mtkdsa-wan-port = <' 'status = "okay"'; do
+              if grep -qF "$p" "$DTSF"; then
                 echo "OK：$p"
               else
                 echo "!! 失败：dts 缺少 $p"
                 echo "   hnat.c:718/747 对 mtketh-wan、mtketh-max-gmac 是 return -EINVAL（硬失败）；"
                 echo "   少了它们 probe 直接失败，dmesg 不报错、debugfs 不出现、加速静默不生效。"
+                echo "   缺 mtkdsa-wan-port 则 wan_dsa_port=0xff，按 swconfig 的 VLAN 规则填 STAG，DSA 下端口错。"
                 exit 1
               fi
             done
+            # DSA 机型不该出现无线 ext-devices（本机无 wifi/USB 网卡）
+            if grep -qE 'ext-devices[[:space:]]*=' "$DTSF"; then
+              echo "!! 失败：dts 里出现了 ext-devices —— 本机无无线，不应注册 wlan0/ra0 之类的外部接口"
+              exit 1
+            fi
+            echo "OK：&hnat 六项齐备，且无无线 ext-devices"
 
             echo "--- 设备包校验（无线/USB 必须已从 DEVICE_PACKAGES 移除）---"
             DP=$(sed -n '/define Device\/iptime_a3004ns-dual/,/^endef/p' openwrt/target/linux/ramips/image/mt7621.mk | grep 'DEVICE_PACKAGES' | head -1)
