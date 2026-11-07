@@ -40,6 +40,24 @@ wpad-wolfssl
 wpad-mbedtls
 wpad
 wireless-regdb
+# hostapd 自身：wpad-* 一关，hostapd-common 仍会被 target 默认包或某处 select 拉回，
+# 它一在，整个 package/network/services/hostapd 目录都要编译（run 42372404613 实测）。
+hostapd
+hostapd-common
+hostapd-utils
+wireless-tools
+swconfig
+prism54-firmware
+p54-usb-firmware
+p54-pci-firmware
+p54-spi-firmware
+mtkhqos_util
+luci-app-eqos-mtk
+luci-app-mwan3helper-chinaroute
+ebtables
+kmod-ebtables
+kmod-ebtables-ipv4
+kmod-ebtables-ipv6
 kmod-usb-core
 kmod-usb2
 kmod-usb3
