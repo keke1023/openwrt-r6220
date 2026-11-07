@@ -127,6 +127,13 @@ cat > files/etc/uci-defaults/99-hnat-defaults <<'UCI_EOF'
 uci -q set firewall.@defaults[0].flow_offloading='0'
 uci -q set firewall.@defaults[0].flow_offloading_hw='0'
 uci -q commit firewall
+
+# 中断均衡：把网卡中断从 CPU0 分散到 4 核（HNAT 只管已卸载流量，
+# 首包/代理/UDP 仍走 CPU，irqbalance 对这部分有实际收益）
+if [ -x /etc/init.d/irqbalance ]; then
+	/etc/init.d/irqbalance enable
+	/etc/init.d/irqbalance start
+fi
 exit 0
 UCI_EOF
 chmod +x files/etc/uci-defaults/99-hnat-defaults

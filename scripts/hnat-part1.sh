@@ -123,6 +123,41 @@ XRAY_VER=$(grep -m1 '^PKG_VERSION:=' "$XRAY_MK" | cut -d'=' -f2)
 echo "==> xray-core 锁定版本：v$XRAY_VER"
 
 # ---------------------------------------------------------------------------
+# 3b) xray 二进制精简（复用仓库既有的 scripts/patch-xray-slim.py）
+#
+# 必须放在「版本前移」之后：那个脚本是按 PKG_VERSION 选补丁集的（1.8.4 与 1.8.24
+# 源码结构不同，1.8.4 的补丁喂给 1.8.24 会 11 个文件全部 reject）。这里版本已锁在
+# 1.8.24，脚本会自动取 xray-patches/1.8.24/ 那 5 个补丁：
+#   001 删 all.go 的空导入
+#   002 删 gRPC API 模块 + CLI api 子命令
+#   003 grpc 全链（tls/grpc.go + conf/{grpc,api}.go）
+#   004 wireguard/gvisor
+#   005 QUIC/HTTP3 —— 含 splithttp 自带的 quic-go/http3 入口，漏了它 quic-go 会被链回来
+#
+# 保留 vless + reality + tls + tcp/udp + ws + http + httpupgrade + vmess +
+# shadowsocks + trojan + socks + dokodemo + freedom —— vless+reality+vision 完整可用。
+# 机制：把 diff 放进 xray-core/patches/，靠 OpenWrt 的 Build/Patch 在 Prepare 阶段
+# 无条件应用（不是覆盖 Build/Prepare，那个 hook 在实测中被证明不生效）。
+# ---------------------------------------------------------------------------
+XRAY_SLIM_PY="../scripts/patch-xray-slim.py"
+if [ -f "$XRAY_SLIM_PY" ]; then
+  echo "==> xray 二进制精简（按 PKG_VERSION=v$XRAY_VER 自动选补丁集）"
+  if ! python3 "$XRAY_SLIM_PY" "package/helloworld/xray-core"; then
+    echo "!! 错误：xray 精简补丁落位失败"
+    exit 1
+  fi
+  echo "    已落位补丁："
+  ls -1 package/helloworld/xray-core/patches 2>/dev/null | sed 's/^/       /'
+  # 回读校验：补丁目录必须非空，否则等于没精简（固件体积会明显变大）
+  if [ -z "$(ls -A package/helloworld/xray-core/patches 2>/dev/null)" ]; then
+    echo "!! 错误：xray-core/patches 为空 —— 精简未生效，16MB 大概率装不下"
+    exit 1
+  fi
+else
+  echo "!! 警告：缺少 $XRAY_SLIM_PY，跳过 xray 精简（固件体积会明显变大）"
+fi
+
+# ---------------------------------------------------------------------------
 # 4) 187-2 订阅兼容补丁（与 18.06 线完全相同的四条，理由见 diy-part1.sh 对应注释）
 #
 #   [A] transport=raw —— xray v24.9+ 把 tcp 改名 raw，订阅开始下发 type=raw。
