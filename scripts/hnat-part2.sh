@@ -2,8 +2,10 @@
 # HNAT-P2: 在 feeds install 之后、make 之前运行（当前位于 openwrt 源码根目录）
 #
 # 把「padavanonly/immortalwrt @ master」改造成「A3004NS-dual + MT7621 硬件 NAT +
-# 纯有线 + ssr-plus」的形态。四处改动：
+# 纯有线 + ssr-plus」的形态。五处改动：
 #
+#   [0] 删掉 helloworld 的 passwall / vssr 与 telephony 的 baresip —— 它们的 Kconfig
+#       会触发 recursive dependency，让 make defconfig 丢包（与是否选中无关）
 #   [1] 设备树启用 hnat 节点（DSA 变体：mtketh-wan="wan" + mtkdsa-wan-port），不写 ext-devices
 #   [2] 内核配置确认 HNAT 为 =m（模块），由 KernelPackage/ramips_hnat 打包进固件
 #   [3] 摘掉 mt7621.mk 里 A3004NS 的 DEVICE_PACKAGES（无线 / USB）
@@ -90,6 +92,47 @@ RMOD="target/linux/ramips/modules.mk"
 for f in "$DTS" "$KCFG" "$MK" "$RMOD"; do
   [ -f "$f" ] || { echo "!! 错误：缺少 $f —— 源码树与预期不符，中止"; exit 1; }
 done
+
+# ---------------------------------------------------------------------------
+# [0] 拆掉与本机型无关、却会让 kconfig 报 recursive dependency 的包
+#
+# 2026-11-07 run 42370054625：make defconfig 在两个环上报错，构建当场被判死。
+#   环1（helloworld 里的 passwall）：
+#     PACKAGE_iptables is selected by PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy
+#     → PACKAGE_firewall4 → PACKAGE_kmod-ipt-nat → PACKAGE_kmod-ipt-dnetmap
+#     → PACKAGE_iptables-mod-dnetmap → PACKAGE_iptables
+#   环2（telephony feed 的 baresip）：
+#     PACKAGE_baresip-mod-avcodec is selected by PACKAGE_baresip-mod-avformat
+#     ↔ PACKAGE_baresip-mod-avformat depends on PACKAGE_baresip-mod-avcodec
+#
+# 本机型两个都不用：passwall 在 config 里显式 =n（走 ssr-plus），baresip 属 telephony。
+# 环是 Kconfig 结构问题，跟选不选无关 —— 只要这些目录还在 package/ 下，
+# tmp/.config-package.in 就会生成同样的环，kconfig 顺手丢掉的 symbol 还不一定是谁。
+# 所以直接删目录，从源头消环，比事后猜「丢了哪几个包」可靠得多。
+# ---------------------------------------------------------------------------
+echo "==> [0] 清理会造成 kconfig 循环依赖的无关包"
+CLEANED=""
+for d in package/helloworld/luci-app-passwall \
+         package/helloworld/luci-app-passwall2 \
+         package/helloworld/luci-app-vssr \
+         package/feeds/*/baresip \
+         package/feeds/*/baresip-mod-avcodec \
+         package/feeds/*/baresip-mod-avformat; do
+  [ -d "$d" ] || continue
+  rm -rf "$d"
+  CLEANED="$CLEANED $(basename "$d")"
+done
+if [ -n "$CLEANED" ]; then
+  echo "    已删除：$CLEANED"
+else
+  echo "   (注意) 没有匹配到任何包 —— feed 结构可能变了，环可能来自别处，看 defconfig 输出"
+fi
+
+# 删过头会把命根子删掉，这里立刻验回来
+for d in package/helloworld/luci-app-ssr-plus package/helloworld/xray-core; do
+  [ -d "$d" ] || { echo "!! 错误：$d 不存在 —— 清理误伤，中止"; exit 1; }
+done
+echo "    OK：ssr-plus / xray-core 目录完好"
 
 # ---------------------------------------------------------------------------
 # [1] 设备树：启用 hnat 节点 + 补齐 hnat_probe 必需的属性

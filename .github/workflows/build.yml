@@ -262,12 +262,25 @@ jobs:
           # 镜像变小、体积检查反而报 OK）。这里把日志落盘并当场判死，10 分钟内失败。
           make defconfig 2>&1 | tee /tmp/defconfig.log
           if grep -q 'recursive dependency detected' /tmp/defconfig.log; then
-            echo "!! 失败：kconfig 检出循环依赖，部分 symbol 已被静默丢弃（构建产物会缺包）"
+            echo "!! kconfig 报了循环依赖 —— 先确认关键包有没有被静默丢弃"
             grep -A 6 'recursive dependency detected' /tmp/defconfig.log || true
-            echo "   已知环：ssr-plus -> coreutils <- vssr -> iptables <- ssr-plus"
-            echo "   已实测：删掉 ssr-plus 的 +coreutils 无效（run 41288545484 复现同环），"
-            echo "   正确做法是让 ssr-plus 依赖保持上游原样，见 scripts/diy-part2.sh 第 [20] 段 ①"
-            exit 1
+            # 判据不是「有没有环」，而是「关键包还在不在」。
+            # 2026-11-07 run 42370054625：环来自没选中的 passwall/baresip，
+            # 直接 exit 1 会把一次本来能出固件的构建误杀；而 2026-11-01 那次
+            # ssr-plus 连同 19 个包被丢，才是真事故。所以按关键包实测判定。
+            LOST=""
+            for p in luci-app-ssr-plus luci-app-ssr-plus_Iptables_Transparent_Proxy \
+                     xray-core kmod-ramips_hnat dnsmasq-full iptables; do
+              grep -qE "^CONFIG_PACKAGE_${p}=y$" .config || LOST="$LOST $p"
+            done
+            if [ -n "$LOST" ]; then
+              echo "!! 失败：以下关键包在 defconfig 后被丢弃：$LOST"
+              echo "   排查：看上面每个环的链条，确认是哪个包把它们吃掉的；"
+              echo "   hnat-part2.sh 的 [0] 段负责删掉会造成环的无关包（passwall/baresip）。"
+              exit 1
+            fi
+            echo "   (警告) 环存在，但 ssr-plus/xray/ramips_hnat/dnsmasq/iptables 均在 .config 里 =y"
+            echo "   环来自未选中的包，继续；后面的一致性校验还会再核一遍"
           fi
 
       - name: 强制剔除默认全家桶/无无线/USB 链（defconfig 之后固化）
