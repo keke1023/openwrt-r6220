@@ -51,7 +51,6 @@ prism54-firmware
 p54-usb-firmware
 p54-pci-firmware
 p54-spi-firmware
-mtkhqos_util
 luci-app-eqos-mtk
 luci-app-mwan3helper-chinaroute
 ebtables

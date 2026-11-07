@@ -390,7 +390,7 @@ jobs:
           # 按机型分叉：a3004ns 是纯有线（无线必须全灭）；k2p 要开源无线（必须齐备）。
           CFG="${{ matrix.config }}"
           if echo "$CFG" | grep -qE '^a3004ns-dual\.config$'; then
-            BAD=$(grep -E '^CONFIG_PACKAGE_(kmod-usb[^=]*|kmod-mt76[a-z0-9]*|kmod-mac80211|kmod-cfg80211|wpad[a-z0-9_.-]*|hostapd[a-z0-9_.-]*|wireless-tools|swconfig|prism54-firmware|p54-[a-z]+-firmware|mtkhqos_util|luci-app-eqos-mtk|luci-app-mwan3helper-chinaroute|ebtables|kmod-ebtables[a-z0-9-]*)=(y|m)$' /tmp/resolved.config || true)
+            BAD=$(grep -E '^CONFIG_PACKAGE_(kmod-usb[^=]*|kmod-mt76[a-z0-9]*|kmod-mac80211|kmod-cfg80211|wpad[a-z0-9_.-]*|hostapd[a-z0-9_.-]*|wireless-tools|swconfig|prism54-firmware|p54-[a-z]+-firmware|luci-app-eqos-mtk|luci-app-mwan3helper-chinaroute|ebtables|kmod-ebtables[a-z0-9-]*)=(y|m)$' /tmp/resolved.config || true)
             if [ -n "$BAD" ]; then
               echo "!! 失败：以下被剔除的包在 kconfig 解析后又出现了（说明有包 select / DEVICE_PACKAGES 拉回）："
               echo "$BAD"
@@ -707,6 +707,15 @@ jobs:
           for p in luci-app-ssr-plus xray-core; do
             grep -q "^$p " "$MAN" || MISSING="$MISSING $p"
           done
+          # mtkhqos_util 必须进镜像：它负责开机给 QDMA 的 qdma_txq0..15 写
+          # QTX_SCH/QTX_CFG 寄存器（scheduler / 限速开关 / weight / resv）。
+          # 这些寄存器是否与驱动默认值等价，没有证据，所以必须保留，
+          # 不能因为「不做 QoS」就当成可选包剔掉。
+          if echo "${{ matrix.config }}" | grep -qE '^a3004ns-dual\.config$'; then
+            for p in mtkhqos_util; do
+              grep -q "^$p " "$MAN" || MISSING="$MISSING $p"
+            done
+          fi
           if echo "${{ matrix.config }}" | grep -qE '^(k2p|wr1200js)\.config$'; then
             for p in ngrokc luci-app-ngrokc; do
               grep -q "^$p " "$MAN" || MISSING="$MISSING $p"

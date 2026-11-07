@@ -348,6 +348,7 @@ if [ -d /proc/sys/net/bridge ]; then
 	echo 0 > /proc/sys/net/bridge/bridge-nf-call-ip6tables
 	echo 0 > /proc/sys/net/bridge/bridge-nf-filter-pppoe-tagged 2>/dev/null
 	echo 0 > /proc/sys/net/bridge/bridge-nf-filter-vlan-tagged 2>/dev/null
+	echo 0 > /proc/sys/net/bridge/bridge-nf-pass-vlan-input-dev 2>/dev/null
 fi
 # conntrack 容量：HNAT 只是把已建立的流卸载，首包仍需建 conntrack，
 # 代理场景连接多，给足桶大小避免 table full
