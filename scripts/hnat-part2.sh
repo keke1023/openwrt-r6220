@@ -111,14 +111,22 @@ done
 # 所以直接删目录，从源头消环，比事后猜「丢了哪几个包」可靠得多。
 # ---------------------------------------------------------------------------
 echo "==> [0] 清理会造成 kconfig 循环依赖的无关包"
+# passwall 有两个可能的来源，两个都要覆盖：
+#   · padavanonly 的 luci feed → feeds install 后落在 package/feeds/luci/luci-app-passwall
+#     （run 42370662845 日志：Installing package 'luci-app-passwall' from luci）
+#   · fw876/helloworld 里若也有 → package/helloworld/luci-app-passwall
+# 只删前者的那一版（run 42370662845）只清掉了 baresip，环1 原封不动，
+# 且 kconfig 丢掉的正是 luci-app-ssr-plus_Iptables_Transparent_Proxy —— 确实会咬到我们。
 CLEANED=""
 for d in package/helloworld/luci-app-passwall \
          package/helloworld/luci-app-passwall2 \
          package/helloworld/luci-app-vssr \
+         package/feeds/*/luci-app-passwall \
+         package/feeds/*/luci-app-passwall2 \
+         package/feeds/*/luci-app-vssr \
          package/feeds/*/baresip \
-         package/feeds/*/baresip-mod-avcodec \
-         package/feeds/*/baresip-mod-avformat; do
-  [ -d "$d" ] || continue
+         package/feeds/*/baresip-*; do
+  [ -e "$d" ] || continue
   rm -rf "$d"
   CLEANED="$CLEANED $(basename "$d")"
 done
