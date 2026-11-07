@@ -84,7 +84,6 @@ kmod-nf-flow
 kmod-nf-nathelper-extra
 ppp
 ppp-mod-pppoe
-odhcp6c
 odhcpd
 "
 
