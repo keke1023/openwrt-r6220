@@ -403,15 +403,19 @@ jobs:
             # K2P 反向校验（2026-11-04 起闭源）：mt_wifi 全家必须在，开源 mt7615e 必须不在。
             # 背景：开源 mt76（2021-10 树）对 MT7615D DBDC 热重启有 bug（radio1 phy
             # 消失 / HOSTAPD_START_FAILED），实机验证无法正常使用，已换回闭源驱动。
+            # 三层都要：kmod-mt7615d（驱动）+ mt_wifi（配置/脚本，DEPENDS +wireless-tools）
+            #          + luci-app-mtwifi（界面）。缺任一层都不是「少个功能」而是「没信号」。
+            # swconfig 也在列表里：K2P 的 VLAN 划分靠它（与 a3004ns 的 DSA 相反）。
             MISS=""
-            for p in kmod-mt7615d luci-app-mtwifi kmod-mac80211 kmod-cfg80211 wpad-basic; do
+            for p in kmod-mt7615d mt_wifi luci-app-mtwifi kmod-mac80211 kmod-cfg80211 \
+                     wpad-basic wireless-tools swconfig; do
               grep -qE "^CONFIG_PACKAGE_${p}=y$" /tmp/resolved.config || MISS="$MISS $p"
             done
             if [ -n "$MISS" ]; then
-              echo "!! 失败：以下闭源无线包在 kconfig 解析后不是 y："
+              echo "!! 失败：以下闭源无线/交换底座包在 kconfig 解析后不是 y："
               for p in $MISS; do echo "   CONFIG_PACKAGE_${p}"; done
-              echo "!! 排查：diy-part2 第 [18] 段是否被 K2P_OPEN_MT76=1 误触发？"
-              echo "         config 里 kmod-mt7615d/luci-app-mtwifi 是否被写成 =n？"
+              echo "!! 排查：k2p.config 里是否误写 =n？hnat-strip.sh 是否把无线栈剔了？"
+              echo "         （strip 里 k2p 分支只该剔开源 mt76 与多余 wpad 变体）"
               exit 1
             fi
             BADC=$(grep -E '^CONFIG_PACKAGE_(kmod-mt7615e|kmod-mt7615-firmware)=(y|m)$' /tmp/resolved.config || true)
@@ -510,6 +514,13 @@ jobs:
                 || { echo "!! 失败：${{ matrix.config }} 期望 $p=y，最终 .config 里没有"; exit 1; }
             done
             echo "OK：核心包已选中（luci-app-ssr-plus / xray-core / luci-app-ngrokc / ngrokc）"
+          fi
+          if echo "${{ matrix.config }}" | grep -qE '^k2p\.config$'; then
+            for p in luci-app-autoreboot; do
+              grep -qE "^CONFIG_PACKAGE_${p}=y$" .config \
+                || { echo "!! 失败：k2p 期望 $p=y（定时重启），最终 .config 里没有"; exit 1; }
+            done
+            echo "OK：luci-app-autoreboot 已选中（定时重启）"
           fi
 
           # ---- 校验 N：squashfs 块大小（2026-11-01 新增的零功能代价瘦身项）----
@@ -629,38 +640,88 @@ jobs:
               echo "   (提示) 未在 build_dir 暂存 rootfs 里找到，可能 files/ 在镜像阶段才合并"
             fi
 
-            echo "--- 设备树校验（status 只是其一，probe 还硬性要求两个属性）---"
-            DTSF=openwrt/target/linux/ramips/dts/mt7621_iptime_a3004ns-dual.dts
-            # 注意：下面用 grep -F（固定字符串，避免 < > { " 被正则解释），
-            # 所以模式里**不能出现 ^ $ . * 这类正则记号** —— 它们会被当字面字符：
-            # run 42372404613 就是把 '^&hnat {' 配 -F，^ 成了字面量，第一个模式必然不匹配，
-            # 明明 dts 里六项齐全（DIY-P2 已逐项打印 OK）却在这一步判死。
-            for p in '&hnat {' 'mtketh-wan = "wan"' 'mtketh-lan = "lan"' 'mtketh-ppd = "eth0"' 'mtketh-max-gmac = <1>' 'mtkdsa-wan-port = <' 'status = "okay"'; do
-              if grep -qF "$p" "$DTSF"; then
-                echo "OK：$p"
-              else
-                echo "!! 失败：dts 缺少 $p"
-                echo "   hnat.c:718/747 对 mtketh-wan、mtketh-max-gmac 是 return -EINVAL（硬失败）；"
-                echo "   少了它们 probe 直接失败，dmesg 不报错、debugfs 不出现、加速静默不生效。"
-                echo "   缺 mtkdsa-wan-port 则 wan_dsa_port=0xff，按 swconfig 的 VLAN 规则填 STAG，DSA 下端口错。"
+            echo "--- 设备树校验（两个机型的 &hnat 是相反形态，必须分开验）---"
+            if echo "${{ matrix.config }}" | grep -qE '^k2p\.config$'; then
+              # K2P：swconfig 变体，上游 dts 自带，hnat-part2.sh 只校验不改写
+              DTSF=openwrt/target/linux/ramips/dts/mt7621_phicomm_k2p.dts
+              for p in '&hnat {' 'mtketh-wan = "eth1"' 'mtketh-lan = "eth0"' 'mtketh-ppd = "eth0"' 'mtketh-max-gmac = <2>' 'status = "okay"'; do
+                if grep -qF "$p" "$DTSF"; then
+                  echo "OK：$p"
+                else
+                  echo "!! 失败：dts 缺少 $p"
+                  echo "   K2P 是双 gmac（gmac0→eth0 LAN / gmac1→eth1 WAN），max-gmac 必须为 2；"
+                  echo "   mtketh-wan 写成 eth0 或 \"wan\" 会永远匹配不到 WAN 流量（probe 成功但零加速）。"
+                  exit 1
+                fi
+              done
+              # ext-devices 必须存在：闭源无线的 AP/中继口靠它注册成 ext_if
+              if ! grep -qE 'ext-devices[[:space:]]*=' "$DTSF"; then
+                echo "!! 失败：K2P 的 dts 没有 ext-devices"
+                echo "   闭源无线接口（ra0/rai0/apcli0）不会注册成 ext_if，"
+                echo "   WLAN↔WAN 流量走不到 FOE 卸载（能编译、无线能用，但没有加速）"
                 exit 1
               fi
-            done
-            # DSA 机型不该出现无线 ext-devices（本机无 wifi/USB 网卡）
-            if grep -qE 'ext-devices[[:space:]]*=' "$DTSF"; then
-              echo "!! 失败：dts 里出现了 ext-devices —— 本机无无线，不应注册 wlan0/ra0 之类的外部接口"
-              exit 1
+              for dev in ra0 rai0 apcli0; do
+                grep -q "\"$dev\"" "$DTSF" || { echo "!! 失败：ext-devices 缺 \"$dev\""; exit 1; }
+              done
+              # 反向：swconfig 机型绝不能有 mtkdsa-wan-port
+              if grep -qE 'mtkdsa-wan-port[[:space:]]*=' "$DTSF"; then
+                echo "!! 失败：K2P 是 swconfig 机型，dts 却带 mtkdsa-wan-port"
+                echo "   该属性会打开 hnat_dsa_fill_stag() 路径，按 DSA 端口号填 STAG，swconfig 下转发端口必错"
+                exit 1
+              fi
+              echo "OK：&hnat 为 swconfig 变体（wan=eth1 / lan=eth0 / max-gmac=2 / ext-devices 含 ra0 rai0 apcli0）"
+            else
+              DTSF=openwrt/target/linux/ramips/dts/mt7621_iptime_a3004ns-dual.dts
+              # 注意：下面用 grep -F（固定字符串，避免 < > { " 被正则解释），
+              # 所以模式里**不能出现 ^ $ . * 这类正则记号** —— 它们会被当字面字符：
+              # run 42372404613 就是把 '^&hnat {' 配 -F，^ 成了字面量，第一个模式必然不匹配，
+              # 明明 dts 里六项齐全（DIY-P2 已逐项打印 OK）却在这一步判死。
+              for p in '&hnat {' 'mtketh-wan = "wan"' 'mtketh-lan = "lan"' 'mtketh-ppd = "eth0"' 'mtketh-max-gmac = <1>' 'mtkdsa-wan-port = <' 'status = "okay"'; do
+                if grep -qF "$p" "$DTSF"; then
+                  echo "OK：$p"
+                else
+                  echo "!! 失败：dts 缺少 $p"
+                  echo "   hnat.c:718/747 对 mtketh-wan、mtketh-max-gmac 是 return -EINVAL（硬失败）；"
+                  echo "   少了它们 probe 直接失败，dmesg 不报错、debugfs 不出现、加速静默不生效。"
+                  echo "   缺 mtkdsa-wan-port 则 wan_dsa_port=0xff，按 swconfig 的 VLAN 规则填 STAG，DSA 下端口错。"
+                  exit 1
+                fi
+              done
+              # DSA 机型不该出现无线 ext-devices（本机无 wifi/USB 网卡）
+              if grep -qE 'ext-devices[[:space:]]*=' "$DTSF"; then
+                echo "!! 失败：dts 里出现了 ext-devices —— 本机无无线，不应注册 wlan0/ra0 之类的外部接口"
+                exit 1
+              fi
+              echo "OK：&hnat 六项齐备，且无无线 ext-devices"
             fi
-            echo "OK：&hnat 六项齐备，且无无线 ext-devices"
 
-            echo "--- 设备包校验（无线/USB 必须已从 DEVICE_PACKAGES 移除）---"
-            DP=$(sed -n '/define Device\/iptime_a3004ns-dual/,/^endef/p' openwrt/target/linux/ramips/image/mt7621.mk | grep 'DEVICE_PACKAGES' | head -1)
-            echo "   $DP"
-            if echo "$DP" | grep -qE 'kmod-mt76|kmod-usb'; then
-              echo "!! 失败：DEVICE_PACKAGES 里仍有无线/USB 包，会强制拉进固件"
-              exit 1
+            echo "--- 设备包校验（两个机型的 DEVICE_PACKAGES 方向相反）---"
+            if echo "${{ matrix.config }}" | grep -qE '^k2p\.config$'; then
+              DP=$(sed -n '/define Device\/phicomm_k2p/,/^endef/p' openwrt/target/linux/ramips/image/mt7621.mk | grep 'DEVICE_PACKAGES' | head -1)
+              echo "   $DP"
+              for p in kmod-mt7615d luci-app-mtwifi; do
+                echo "$DP" | grep -q "$p" \
+                  || { echo "!! 失败：K2P 的 DEVICE_PACKAGES 缺 $p —— 固件缺闭源无线驱动/界面（编译不报错）"; exit 1; }
+              done
+              # 开源 mt76 不能出现。必须整词比对：kmod-mt7615d（闭源）与
+              # kmod-mt7615e（开源）只差一个字母，前缀正则会把合法的那个一起判死。
+              for bad in kmod-mt7615e kmod-mt7615-firmware kmod-mt76 kmod-mt76x2 kmod-mt7603; do
+                if echo "$DP" | tr ' \t' '\n\n' | grep -qx "$bad"; then
+                  echo "!! 失败：K2P 的 DEVICE_PACKAGES 含开源驱动 $bad —— 会与闭源 mt_wifi 抢同一张 PCI 卡"
+                  exit 1
+                fi
+              done
+              echo "OK：K2P 保留闭源无线（kmod-mt7615d + luci-app-mtwifi），且无开源 mt76"
+            else
+              DP=$(sed -n '/define Device\/iptime_a3004ns-dual/,/^endef/p' openwrt/target/linux/ramips/image/mt7621.mk | grep 'DEVICE_PACKAGES' | head -1)
+              echo "   $DP"
+              if echo "$DP" | grep -qE 'kmod-mt76|kmod-usb'; then
+                echo "!! 失败：DEVICE_PACKAGES 里仍有无线/USB 包，会强制拉进固件"
+                exit 1
+              fi
+              echo "OK：DEVICE_PACKAGES 已清空"
             fi
-            echo "OK：DEVICE_PACKAGES 已清空"
           elif echo "${{ matrix.config }}" | grep -qE '^(a3004ns-dual|k2p|wr1200js)\.config$'; then
             KC=$(ls -1 openwrt/build_dir/target-*/linux-*/linux-*/.config 2>/dev/null | head -1)
             if [ -n "$KC" ]; then
@@ -711,13 +772,21 @@ jobs:
           # QTX_SCH/QTX_CFG 寄存器（scheduler / 限速开关 / weight / resv）。
           # 这些寄存器是否与驱动默认值等价，没有证据，所以必须保留，
           # 不能因为「不做 QoS」就当成可选包剔掉。
-          if echo "${{ matrix.config }}" | grep -qE '^a3004ns-dual\.config$'; then
+          if echo "${{ matrix.config }}" | grep -qE '^(a3004ns-dual|k2p)\.config$'; then
             for p in mtkhqos_util; do
               grep -q "^$p " "$MAN" || MISSING="$MISSING $p"
             done
           fi
           if echo "${{ matrix.config }}" | grep -qE '^(k2p|wr1200js)\.config$'; then
             for p in ngrokc luci-app-ngrokc; do
+              grep -q "^$p " "$MAN" || MISSING="$MISSING $p"
+            done
+          fi
+          if echo "${{ matrix.config }}" | grep -qE '^k2p\.config$'; then
+            # 闭源无线三层 + 定时重启必须真的进镜像。
+            # 这几个包「没进」时固件照样能开机：界面在、菜单能点，只是没信号 / 不会重启，
+            # 属于最难发现的假成功，必须用 manifest 硬卡。
+            for p in kmod-mt7615d mt_wifi wpad-basic luci-app-mtwifi luci-app-autoreboot; do
               grep -q "^$p " "$MAN" || MISSING="$MISSING $p"
             done
           fi
