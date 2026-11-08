@@ -427,6 +427,27 @@ jobs:
             echo "OK：K2P 闭源无线栈齐备且无开源 mt7615e"
           fi
 
+          # ---- 校验 B2：同源变体包不得同时选中（打包期 check_data_file_clashes → Error 255）----
+          # odhcpd(full) 与 odhcpd-ipv6only 由同一个 Makefile 产出，装的文件完全相同
+          # （/etc/init.d/odhcpd、/usr/sbin/odhcpd、usr/sbin/odhcpd-update、15_odhcpd）。
+          # 上游用 PROVIDES/CONFLICTS 标注互斥，但 kconfig 不看这层元数据，两个都能 =y，
+          # 到 package/install 阶段才炸（run 42436911833）。dnsmasq / dnsmasq-full 同理。
+          # 放在这里秒级拦住，别等到编译一小时后再花 5 分钟解 opkg 冲突。
+          for pair in "odhcpd odhcpd-ipv6only" "dnsmasq dnsmasq-full"; do
+            set -- $pair
+            NA=$(grep -cE "^CONFIG_PACKAGE_$1=y$" /tmp/resolved.config || true)
+            NB=$(grep -cE "^CONFIG_PACKAGE_$2=y$" /tmp/resolved.config || true)
+            if [ "${NA:-0}" -gt 0 ] && [ "${NB:-0}" -gt 0 ]; then
+              echo "!! 失败：$1 与 $2 同时被选中"
+              echo "   这两者是同一个源的两个变体，装的文件完全相同，打包期必然 check_data_file_clashes"
+              echo "   （表现为 opkg_install_cmd: Cannot install package $1 + package/install Error 255）"
+              echo "   解决：只留一个。注意默认包可能硬依赖其中一个（如 ipv6helper 硬依赖 odhcpd-ipv6only），"
+              echo "         那种情况下应该保住默认包、把另一个改成 =n。"
+              exit 1
+            fi
+          done
+          echo "OK：无同源变体包同时选中"
+
           if echo "$CFG" | grep -qE '^wr1200js\.config$'; then
             # WR1200JS 反向校验：开源 mt7603 + mt76x2 必须在，mt7615 全家必须不在。
             # 本机是 MT7603E(2.4G) + MT7612E(5G) 两颗独立芯片，DTS 走 pcie0/pcie1，
