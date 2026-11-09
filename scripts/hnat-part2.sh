@@ -9,7 +9,7 @@
 #   k2p.config          : swconfig、闭源无线。dts 已有 hnat 节点 → 只校验不改；
 #                         DEVICE_PACKAGES 保留闭源驱动；默认 IP 保持 192.168.1.1
 #
-# 五处改动：
+# 六处改动：
 #
 #   [0] 删掉 helloworld 的 passwall / vssr 与 telephony 的 baresip —— 它们的 Kconfig
 #       会触发 recursive dependency，让 make defconfig 丢包（与是否选中无关）
@@ -19,6 +19,7 @@
 #   [3] a3004ns 摘掉 mt7621.mk 的 DEVICE_PACKAGES（无线 / USB）；
 #       k2p 保留 kmod-mt7615d + luci-app-mtwifi（闭源无线，缺了就是「有界面没信号」）
 #   [4] 默认管理地址 + flow_offloading + offload 相关 sysctl（bridge-nf 按有无无线分叉）
+#   [5] k2p：修 luci-app-mtwifi 的 band→接口名映射（2.4G/5G 面板接口名互换）
 #
 # ============================================================================
 # 关于 [1] 为什么是 DSA 写法，而不是照抄 jcg_q20 的 &hnat 段
@@ -590,5 +591,81 @@ UCI_EOF
 chmod +x "$UCI_F"
 sh -n "$UCI_F" || { echo "!! 99-hnat-defaults 语法错误"; exit 1; }
 echo "    已注入 $UCI_F（flow_offloading=0 + bridge-nf + conntrack，机型：$MODEL_KIND）"
+
+# ---------------------------------------------------------------------------
+# [5] K2P：修复 luci-app-mtwifi 的 2.4G / 5G 接口名互换（band 映射）
+#
+# 现象：LuCI「MTK WiFi」里 5G 设备显示的接口是 ra0/ra1…，2.4G 显示 rax0/rax1…，
+#       与实际相反 —— 5G 的客户端列表、RSSI、速率统计全取自 2.4G 接口；
+#       手动把两个频段"改回来"后 5G 才恢复正常。
+#
+# 根因（package/emortal/luci-app-mtwifi/root/usr/lib/lua/mtkwifi.lua）：
+#   search_dev_and_profile_orig() 的 case 3 用文件名反推 devname：
+#       string.match(datfile, "(mt7615%.%d%.%dG)%.dat")    --> "mt7615.1.2G"
+#   get_all_devs() 再用第三段决定接口前缀：
+#       subidx = string.match(tmp[3] or "", "(%d+)") == "2" and 2 or 1
+#   "2G" 取到第一个数字 "2"  -> subidx=2 -> dbdc_prefix[1][2]="rax" -> 2.4G 挂 rax0
+#   "5G" 取到 "5"            -> subidx=1 -> dbdc_prefix[1][1]="ra"  -> 5G   挂 ra0
+#   同一处 tonumber(tmp[3]) 对 "2G"/"5G" 均返回 nil，使 dbdc/multiprofile
+#   两个标记从未置位（控制面暂未读取，但字段语义已坏）。
+#
+# 修法：区分「段内是 <n> 还是 <n>G」，两种 devname 形式都覆盖：
+#   mt7615.1.2G / mt7615.1.5G -> 2G 即 2.4G(subidx 1)、5G 即 5G(subidx 2)
+#   mt7615.1.1  / mt7615.1.2  -> 直接取数字
+#   无第三段（单频 dat，如 mt7615.dat）-> subidx=1、devband=nil，与旧行为一致。
+#
+# 必须命中，未命中即中断：否则固件里 2.4G/5G 面板仍是反的，且表面一切正常。
+# ---------------------------------------------------------------------------
+if [ "$MODEL_KIND" = "k2p" ]; then
+  MTKWIFI_LUA="package/emortal/luci-app-mtwifi/root/usr/lib/lua/mtkwifi.lua"
+  echo "==> [5] 修复 luci-app-mtwifi 的 2.4G/5G 接口名映射"
+  if [ ! -f "$MTKWIFI_LUA" ]; then
+    echo "   (跳过) 未找到 $MTKWIFI_LUA（K2P_OPEN_MT76=1 走开源 mt76 时属正常）"
+  else
+    python3 - "$MTKWIFI_LUA" <<'PYEOF'
+import sys
+path = sys.argv[1]
+with open(path, encoding='utf-8', errors='surrogateescape') as f:
+    src = f.read()
+
+OLD = '''            devs[i].subidx = string.match(tmp[3] or "", "(%d+)")=="2" and 2 or 1
+            devs[i].devband = tonumber(tmp[3])'''
+
+NEW = '''            -- [ci-fix] 2.4G/5G 接口名映射：第三段可能是 "1"/"2"，也可能是 "2G"/"5G"
+            -- （后者来自 search_dev_and_profile_orig 的 case 3）。
+            -- 旧代码取段内第一个数字，把 "2G" 的 2 当成 subidx=2，导致两频段互换。
+            local seg = tmp[3] or ""
+            local bandseg = string.match(seg, "^(%d)G$")
+            if bandseg then
+                devs[i].devband = (bandseg == "5") and 2 or 1
+                devs[i].subidx  = devs[i].devband
+            else
+                local numseg = string.match(seg, "^(%d+)$")
+                devs[i].subidx  = (numseg == "2") and 2 or 1
+                devs[i].devband = tonumber(numseg)
+            end'''
+
+if '[ci-fix] 2.4G/5G 接口名映射' in src:
+    print('    已打过补丁，跳过')
+elif src.count(OLD) != 1:
+    sys.exit('!! 错误：subidx 推导块匹配数=%d（应为 1），上游结构可能已变' % src.count(OLD))
+else:
+    with open(path, 'w', encoding='utf-8', errors='surrogateescape') as f:
+        f.write(src.replace(OLD, NEW))
+    print('    已改写 subidx 推导（兼容 mt7615.1.2G 与 mt7615.1.1 两种 devname）')
+PYEOF
+    RC=$?
+    if [ "$RC" != "0" ]; then
+      echo "!! 错误：mtkwifi band 映射补丁失败，中止（避免产出 2.4G/5G 反了的固件）"
+      exit 1
+    fi
+    if grep -q 'bandseg == "5"' "$MTKWIFI_LUA" && grep -q 'ci-fix' "$MTKWIFI_LUA"; then
+      echo "    OK：2.4G -> subidx 1（ra*），5G -> subidx 2（rax*）"
+    else
+      echo "!! 错误：补丁写入后校验失败"
+      exit 1
+    fi
+  fi
+fi
 
 echo "==> HNAT-P2 完成"
