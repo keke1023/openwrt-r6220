@@ -80,7 +80,7 @@ TARGET_CONFIG="${TARGET_CONFIG:-}"
 #     （p186.txt: base-files Depends ... ubi-utils；fstools Depends ... ubi-utils），
 #     强制 =n 会被 kconfig 拉回 =y，直接触发校验0 失败。想省这 70KB 得改 fstools/base-files
 #     的 Makefile，风险远大于收益。
-if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns|k2p|wr1200js'; then
+if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns|k2p|wr1200js|zte_e8821'; then
   echo "==> 16MB 机型（$TARGET_CONFIG）：追加共用瘦身项（conntrack ALG 助手）"
   FORCE_OFF="$FORCE_OFF \
 kmod-nf-nathelper-extra \
@@ -288,6 +288,65 @@ block-mount \
 "
 fi
 
+# ---------------------------------------------------------------------------
+# ZTE E8821：ath79/QCA9563 + ath10k-ct(smallbuffers) + QCA9882 5G
+# ---------------------------------------------------------------------------
+# 与 ramips 那几个机型的区别：
+#   ① 无线栈是 **ath10k-ct**（PCIe 5G）+ **ath9k**（SoC 内置 2.4G），不是 mt76/mt_wifi，
+#      所以绝不能把 a3004ns 段那串 kmod-mt76/... 抄过来（会误伤 ndo 无关但同样不存在的符号，
+#      更重要的是别把 kmod-mac80211 / kmod-cfg80211 关掉 —— ath10k 和 ath9k 都要它）。
+#   ② wpad：ath79 generic 的 DEFAULT_PACKAGES 是 **wpad-basic-openssl**（不是 wpad-openssl），
+#      所以这里保 openssl 版、把其余变体压 =n。若误保 wpad-openssl + wpad-basic-openssl 两个，
+#      打包期会因同一个 PROVIDES（wpad）撞车。
+#   ③ 5G 驱动走 smallbuffers 变体（同一份源码的第二 VARIANT）。两个变体 PROVIDES 都是
+#      kmod-ath10k，**必须一开一关**，否则装的是同一批 .ko，check_data_file_clashes。
+#      想换回 regular：把 FORCE_ON 里的 -smallbuffers 换成 kmod-ath10k-ct，两处对调。
+#   ④ 5G 固件必须是 qca988x-ct（9880/9882）。qca9888-ct 是 9886/9888 的，装错 5G 起不来。
+#   ⑤ uboot-envtools：本机刷 breed，没有可用 U-Boot 环境区，DEVICE_PACKAGES 里已 -掉，
+#      这里再压一遍防 DEFAULT_PACKAGES（ath79/Makefile 里有它）翻回来，省 ~45KB。
+if echo "$TARGET_CONFIG" | grep -qiE 'zte_e8821'; then
+  echo "==> E8821：ath10k-ct(smallbuffers) + qca988x-ct 强制 =y，其余无线/固件变体强制 =n"
+  FORCE_ON="$FORCE_ON \
+kmod-ath10k-ct-smallbuffers \
+ath10k-firmware-qca988x-ct \
+kmod-ath9k \
+kmod-mac80211 \
+kmod-cfg80211 \
+wpad-basic-openssl \
+wireless-regdb \
+hostapd-common \
+swconfig \
+kmod-gpio-button-hotplug \
+kmod-leds-gpio \
+kmod-zram \
+"
+  FORCE_OFF="$FORCE_OFF \
+kmod-ath10k-ct \
+kmod-ath10k \
+ath10k-firmware-qca9888-ct \
+ath10k-firmware-qca9888-ct-full-htt \
+ath10k-firmware-qca988x \
+ath10k-firmware-qca988x-ct-full-htt \
+ath10k-firmware-qca9887-ct \
+wpad-openssl \
+wpad-wolfssl \
+wpad \
+wpad-mini \
+wpad-basic \
+wpad-basic-wolfssl \
+uboot-envtools \
+zram-swap \
+kmod-usb-core \
+kmod-usb2 \
+kmod-usb3 \
+kmod-usb-ehci \
+kmod-usb-ohci \
+kmod-usb-storage \
+usbutils \
+block-mount \
+"
+fi
+
 # 把最终剔除清单导出，供 CI 的「配置一致性校验」逐步核对
 #（该步骤据此判断：被我们强制 =n 的符号，是否被 kconfig 求解又翻回 y/m）
 FORCE_OFF_LIST="${FORCE_OFF_LIST:-/tmp/force-off.list}"
@@ -474,13 +533,57 @@ if echo "$TARGET_CONFIG" | grep -qiE 'wr1200js'; then
 fi
 
 # ---------------------------------------------------------------------------
+# E8821 专项复核：ath10k-ct(smallbuffers) 必须在，其它驱动/固件变体必须不在
+# ---------------------------------------------------------------------------
+# 这里同样只「警告不失败」——致命项由 CI「校验」段 exit 1。
+# 价值在于把三种静默失败提前喊出来：
+#   ① 5G 起不来（ath10k-ct 变体选错 / 固件包选成 qca9888）
+#   ② 2.4G 没信号（ath9k 被当"无线包"误关）
+#   ③ 打包期 PROVIDES 撞车（wpad / kmod-ath10k 两个变体同选）
+if echo "$TARGET_CONFIG" | grep -qiE 'zte_e8821'; then
+  echo "--- [E8821] 无线栈复核（必须 =y）---"
+  MISSING=""
+  for p in kmod-ath10k-ct-smallbuffers ath10k-firmware-qca988x-ct kmod-ath9k \
+           kmod-mac80211 kmod-cfg80211 wpad-basic-openssl swconfig; do
+    grep -qE "^CONFIG_PACKAGE_${p}=y$" .config || MISSING="$MISSING $p"
+  done
+  if [ -n "$MISSING" ]; then
+    echo "!! 警告：以下包未置 y，固件会「能开机、没有 5G」或「2.4G 没信号」："
+    for p in $MISSING; do echo "   $p"; done
+    echo "   排查：config 里是否误写 =n；FORCE_ON 是否被跳过；diy-part1 的 ath10k 校验是否放行"
+  else
+    echo "OK：ath10k-ct-smallbuffers + qca988x-ct + ath9k + wpad-basic-openssl + swconfig 齐备"
+  fi
+
+  echo "--- [E8821] 同源变体复核（必须未选中，否则打包期 check_data_file_clashes）---"
+  # 注意 $ 锚点：'kmod-ath10k-ct' 不能误匹配 'kmod-ath10k-ct-smallbuffers'
+  BADC=$(grep -E '^CONFIG_PACKAGE_(kmod-ath10k-ct|kmod-ath10k|ath10k-firmware-qca9888-ct|ath10k-firmware-qca988x)=[ym]$' .config || true)
+  if [ -n "$BADC" ]; then
+    echo "$BADC"
+    echo "!! 警告：存在互斥变体同时选中 —— kmod-ath10k(-ct) 与 -smallbuffers 是同一份源码，"
+    echo "   装的是同一批 .ko；qca9888-ct 是 9886/9888 的固件，本机 9882 用不了。"
+  else
+    echo "OK：regular ath10k / 主线 ath10k / qca9888 固件 / 非 ct 固件 均未选中"
+  fi
+
+  echo "--- [E8821] zram 复核（kmod-zram 必须 =y；zram-swap 包应 =n，避免与 [16b] 注入的脚本重复）---"
+  grep -E '^CONFIG_PACKAGE_(kmod-zram|zram-swap)=' .config || echo "（kmod-zram 未出现在 .config，[16b] 的 zramswap 将 dry-run 退出）"
+
+  echo "--- [E8821] uboot-envtools 复核（刷 breed，无 U-Boot 环境区，应未选中）---"
+  grep -E '^CONFIG_PACKAGE_uboot-envtools=[ym]$' .config && echo "!! 提示：uboot-envtools 仍在，多占 ~45KB（DEVICE_PACKAGES 的 -uboot-envtools 未生效？）" || echo "OK：uboot-envtools 未选中"
+
+  echo "--- [E8821] PPPoE 复核（当主路由拨号用）---"
+  grep -E '^CONFIG_PACKAGE_(ppp|ppp-mod-pppoe)=' .config || echo "（未选中：本机将无法 PPPoE 拨号，只适合做 AP/旁路由）"
+fi
+
+# ---------------------------------------------------------------------------
 # 16MB 机型共用复核：ssr-plus 的 Shadowsocks(libev) 客户端必须在
 # ---------------------------------------------------------------------------
 # 2026-11-01 起两份 config 都显式选 Libev_Client（ss 协议保留可用）。
 # 这里只做提示，不 exit 1 —— 真正致命的判断交给 CI 的「配置一致性校验 / 校验 D」。
 # ⚠️ Client 是 kconfig choice：一旦 NONE_Client 与 Libev_Client 同时 =y，
 #    解析时只有一个生效，另一个会触发 “out of sync”。
-if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns|k2p|wr1200js'; then
+if echo "$TARGET_CONFIG" | grep -qiE 'a3004ns|k2p|wr1200js|zte_e8821'; then
   echo "--- ssr-plus 客户端选型复核（期望 Libev，ss 协议可用）---"
   grep -E '^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_(NONE|Libev)_Client=' .config || echo "（choice 尚未落盘）"
 

@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+//
+// ZTE E8821 (QCA9563 + QCA9882 + QCA8337N, AC1200, 5 x GE)
+//
+// 骨架来源：OpenWrt master target/linux/ath79/dts/qca9563_yuncore_xd3200.dts
+//          + qca9563_yuncore_xd4200.dtsi
+// 选择理由（不是"看起来像"，是三项硬指标完全一致）：
+//   1) 5G 芯片同族：XD3200 用 ath10k-firmware-qca988x-ct  → 9880/9882
+//      而 XD4200 用 qca9888-ct → 9886/9888，两者校准格式不同，不能混用
+//   2) 5G 校准同长度：art 0x5000 起 0x844 字节（9888 是 0x2f20，差 5.7 倍）
+//   3) Flash 布局同为 16MB：u-boot 0x0/0x40000 + u-boot-env + firmware 0x50000/0xfa0000 + art 0xff0000
+//
+// 与 master 版 XD3200 的差异（因 18.06-k5.4 是内核 5.4，用 hotplug 提校准而非 nvmem-cells）：
+//   - master 里 &pcie 的 wifi@0,0 { nvmem-cells = <&cal_art_5000> } 在 18.06 下改为空 &pcie，
+//     校准由 11-ath10k-caldata 输出 ath10k/cal-pci-0000:00:00.0.bin 完成
+//   - master 里 &wmac { nvmem-cells = <&cal_art_1000> } 在 18.06 下写作 mtd-cal-data = <&art 0x1000>
+//
+// ⚠️ 待实测项（不能猜，标 TODO）：
+//   - LED / 复位键 GPIO
+//   - 交换机端口映射（哪口是 WAN）→ 02_network 里由 diy-part2.sh [25] 段注入，
+//     现按 ath79 5 口标准写法 "0@eth0" "1:lan" "2:lan" "3:lan" "4:lan" "5:wan"
+//   - art 分区偏移（16MB 硬改 + breed 0x5000 布局，通常 0xff0000）
+
+#include "qca956x.dtsi"
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+
+/ {
+	compatible = "zte,e8821", "qca,qca9563";
+	model = "ZTE E8821";
+
+	aliases {
+		label-mac-device = &eth0;
+		led-boot = &led_system;
+		led-failsafe = &led_system;
+		led-running = &led_system;
+		led-upgrade = &led_system;
+	};
+
+	keys {
+		compatible = "gpio-keys";
+
+		reset {
+			label = "reset";
+			linux,code = <KEY_RESTART>;
+			// TODO: E8821 实测。沿用 XD4200 参考设计的 GPIO2，错了会导致
+			//       无法长按复位 / 误触发，但不影响开机。
+			gpios = <&gpio 2 GPIO_ACTIVE_LOW>;
+			debounce-interval = <60>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led_system: system {
+			label = "green:system";
+			// TODO: E8821 实测。XD3200 用 GPIO1(低有效)，E8821 灯位需对表。
+			gpios = <&gpio 1 GPIO_ACTIVE_LOW>;
+			default-state = "keep";
+		};
+	};
+};
+
+&eth0 {
+	status = "okay";
+
+	pll-data = <0x03000101 0x00000101 0x00001919>;
+
+	nvmem-cells = <&macaddr_art_0>;
+	nvmem-cell-names = "mac-address";
+	phy-mode = "sgmii";
+	phy-handle = <&phy0>;
+};
+
+&mdio0 {
+	status = "okay";
+
+	phy-mask = <0>;
+
+	// QCA8337N：port0 走 SGMII 接 SoC eth0（PORT0 PAD MODE CTRL = 0x00080080），
+	// PHY 1~5 对应 5 个千兆口。initvals 与 XD4200/WPJ563/E1700AC 同一套（ar8327 驱动通用）。
+	phy0: ethernet-phy@0 {
+		reg = <0>;
+		phy-mode = "sgmii";
+		qca,mib-poll-interval = <500>;
+
+		qca,ar8327-initvals = <
+			0x04 0x00080080 /* PORT0 PAD MODE CTRL */
+			0x10 0x81000080 /* POWER_ON_STRAP */
+			0x50 0xcf37cf37 /* LED_CTRL0 */
+			0x54 0xcf37cf37 /* LED_CTRL1 */
+			0x58 0xcf37cf37 /* LED_CTRL2 */
+			0x5c 0x0000c300 /* LED_CTRL3 */
+			0x7c 0x0000007e /* PORT0_STATUS */
+		>;
+	};
+};
+
+&pcie {
+	status = "okay";
+
+	// QCA9882 = pci168c,003c。18.06 的 ath10k 会自动探测，不需要 wifi@0,0 子节点。
+	// 千万不要照抄 18.06 xd4200.dtsi 里的 compatible = "pci168c,0056"（那是 9886）。
+};
+
+&spi {
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <25000000>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "u-boot";
+				reg = <0x000000 0x040000>;
+				read-only;
+			};
+
+			partition@40000 {
+				label = "u-boot-env";
+				reg = <0x040000 0x010000>;
+			};
+
+			partition@50000 {
+				compatible = "denx,uimage";
+				label = "firmware";
+				reg = <0x050000 0xfa0000>;
+			};
+
+			// art 必须叫这个 label：wmac 的 mtd-cal-data 和
+			// 11-ath10k-caldata 的 caldata_extract "art" 都靠它取数。
+			art: partition@ff0000 {
+				label = "art";
+				reg = <0xff0000 0x010000>;
+				read-only;
+			};
+		};
+	};
+};
+
+&wmac {
+	status = "okay";
+
+	// 2.4G 校准：art 0x1000，长度 0x440
+	mtd-cal-data = <&art 0x1000>;
+};
+
+&art {
+	compatible = "nvmem-cells";
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	macaddr_art_0: macaddr@0 {
+		reg = <0x0 0x6>;
+	};
+};

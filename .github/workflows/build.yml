@@ -495,7 +495,7 @@ jobs:
           #   默认值在 mipsel 上是 Libev_Client。config 里若误写 NONE_Client=y，
           #   ss-local/ss-redir 会静默消失 —— 编译不报错，刷进机器却发现 ss 节点起不来。
           #   这里用解析后的视图判一次，避免「能编、功能没了」这种最贵的失败。
-          if echo "$CFG" | grep -qE '^(a3004ns-dual|k2p|wr1200js)\.config$'; then
+          if echo "$CFG" | grep -qE '^(a3004ns-dual|k2p|wr1200js|zte_e8821)\.config$'; then
             if ! grep -qE '^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Libev_Client=y$' /tmp/resolved.config; then
               echo "!! 失败：Shadowsocks-libev 客户端未被选中（ss 协议将不可用）"
               echo "   排查：config 里是否残留 INCLUDE_Shadowsocks_NONE_Client=y（choice 互斥）"
@@ -529,19 +529,44 @@ jobs:
               exit 1
             fi
           done
-          if echo "${{ matrix.config }}" | grep -qE '^(k2p|wr1200js)\.config$'; then
+          if echo "${{ matrix.config }}" | grep -qE '^(k2p|wr1200js|zte_e8821)\.config$'; then
             for p in luci-app-ngrokc ngrokc; do
               grep -qE "^CONFIG_PACKAGE_${p}=y$" .config \
                 || { echo "!! 失败：${{ matrix.config }} 期望 $p=y，最终 .config 里没有"; exit 1; }
             done
             echo "OK：核心包已选中（luci-app-ssr-plus / xray-core / luci-app-ngrokc / ngrokc）"
           fi
-          if echo "${{ matrix.config }}" | grep -qE '^k2p\.config$'; then
+          if echo "${{ matrix.config }}" | grep -qE '^(k2p|zte_e8821)\.config$'; then
             for p in luci-app-autoreboot; do
               grep -qE "^CONFIG_PACKAGE_${p}=y$" .config \
-                || { echo "!! 失败：k2p 期望 $p=y（定时重启），最终 .config 里没有"; exit 1; }
+                || { echo "!! 失败：${{ matrix.config }} 期望 $p=y（定时重启），最终 .config 里没有"; exit 1; }
             done
             echo "OK：luci-app-autoreboot 已选中（定时重启）"
+          fi
+
+          # ---- 校验 N-2：E8821 的 ath10k 变体必须唯一且正确 ----
+          # kmod-ath10k-ct 与 kmod-ath10k-ct-smallbuffers 是同一份源码的两个 VARIANT，
+          # 产出同一批 .ko（ath10k_core.ko / ath10k_pci.ko），PROVIDES 都是 kmod-ath10k。
+          # kconfig 不看 PROVIDES 的互斥语义，两个都能 =y，到打包期就 check_data_file_clashes。
+          # 另外 5G 是 QCA9882 → 固件必须 qca988x-ct；qca9888-ct 是 9886/9888 的，装错 5G 起不来。
+          if echo "${{ matrix.config }}" | grep -qE '^zte_e8821\.config$'; then
+            for p in kmod-ath10k-ct-smallbuffers ath10k-firmware-qca988x-ct kmod-ath9k wpad-basic-openssl; do
+              grep -qE "^CONFIG_PACKAGE_${p}=y$" /tmp/resolved.config \
+                || { echo "!! 失败：E8821 期望 $p=y，kconfig 解析后没有"; exit 1; }
+            done
+            for bad in kmod-ath10k-ct kmod-ath10k ath10k-firmware-qca9888-ct ath10k-firmware-qca988x; do
+              if grep -qE "^CONFIG_PACKAGE_${bad}=[ym]$" /tmp/resolved.config; then
+                echo "!! 失败：E8821 不应选中 $bad（与已选变体同源/同 PROVIDES，或固件代际不对）"
+                exit 1
+              fi
+            done
+            BADW=$(grep -E '^CONFIG_PACKAGE_(wpad-openssl|wpad-wolfssl|wpad|wpad-mini|wpad-basic|wpad-basic-wolfssl)=[ym]$' /tmp/resolved.config || true)
+            if [ -n "$BADW" ]; then
+              echo "!! 失败：除 wpad-basic-openssl 之外还有别的 wpad 变体被选中（PROVIDES 冲突）："
+              echo "$BADW"
+              exit 1
+            fi
+            echo "OK：E8821 无线栈唯一（ath10k-ct-smallbuffers + qca988x-ct + ath9k + wpad-basic-openssl）"
           fi
 
           # ---- 校验 N：squashfs 块大小（2026-11-01 新增的零功能代价瘦身项）----
@@ -550,7 +575,7 @@ jobs:
           # 回落到默认值而我们看不出来（体积检查只会看到镜像偏大，却不知原因）。
           BS=$(grep -E '^CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=' /tmp/resolved.config | cut -d= -f2)
           echo "==> squashfs 块大小（kconfig 解析结果）：${BS:-未设置→默认 256} KiB"
-          if echo "${{ matrix.config }}" | grep -qE '^(k2p|wr1200js)\.config$'; then
+          if echo "${{ matrix.config }}" | grep -qE '^(k2p|wr1200js|zte_e8821)\.config$'; then
             if [ "${BS:-}" != "1024" ]; then
               echo "!! 失败：${{ matrix.config }} 期望 CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=1024，实际 '${BS:-}'"
               exit 1
@@ -811,6 +836,15 @@ jobs:
               grep -q "^$p " "$MAN" || MISSING="$MISSING $p"
             done
           fi
+          if echo "${{ matrix.config }}" | grep -qE '^zte_e8821\.config$'; then
+            # E8821：ath10k-ct(smallbuffers) + qca988x 固件 + ath9k + 5 口交换机 + zram + 定时重启
+            # 「没进镜像」时固件照样开机：界面在、菜单能点，只是没 5G 信号 / 网口不通，
+            # 属于最难发现的假成功，必须用 manifest 硬卡。
+            for p in kmod-ath10k-ct-smallbuffers ath10k-firmware-qca988x-ct kmod-ath9k \
+                     wpad-basic-openssl swconfig luci-app-autoreboot kmod-zram; do
+              grep -q "^$p " "$MAN" || MISSING="$MISSING $p"
+            done
+          fi
           if [ -n "$MISSING" ]; then
             echo "!! 失败：manifest 缺少核心包:$MISSING"
             echo "   构建虽然绿了，但功能缺失 = 假成功。先翻 defconfig 日志查"
@@ -845,12 +879,16 @@ jobs:
           #     a3004ns-dual = 16128k（DTS: reg = <0x40000 0xfc0000>）
           #     phicomm_k2p  = 16064k（diy-part2 第19段覆盖 DTS 为 reg = <0x50000 0xfb0000>，
           #                            弃用原厂 permanent_config 换回 320k）
-          if echo "${{ matrix.config }}" | grep -qE '^(a3004ns-dual|k2p|wr1200js)\.config$'; then
+          #     zte_e8821    = 16000k（diy-part2 第25段注入的设备定义；
+          #                            DTS firmware = reg <0x50000 0xfa0000>，art 在 0xff0000）
+          if echo "${{ matrix.config }}" | grep -qE '^(a3004ns-dual|k2p|wr1200js|zte_e8821)\.config$'; then
             SYS=$(ls -1 *squashfs-sysupgrade.bin 2>/dev/null | head -1)
             [ -z "$SYS" ] && { echo "!! 未找到 squashfs-sysupgrade 镜像"; exit 1; }
             SZ=$(stat -c%s "$SYS")
             if echo "${{ matrix.config }}" | grep -qE '^(k2p|wr1200js)\.config$'; then
               LIMIT=$((16064*1024)); LIMITK=16064
+            elif echo "${{ matrix.config }}" | grep -qE '^zte_e8821\.config$'; then
+              LIMIT=$((16000*1024)); LIMITK=16000
             else
               LIMIT=$((16128*1024)); LIMITK=16128
             fi

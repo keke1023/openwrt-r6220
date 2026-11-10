@@ -756,7 +756,7 @@ fi
 #   开源 mt76 无闭源 slab，zram/GOMEMLIMIT 作为零成本保险对齐）。其它机型要
 #   加：改本段正则 + 在对应 config 里加 CONFIG_PACKAGE_kmod-zram=y。
 # ---------------------------------------------------------------------------
-if echo "${TARGET_CONFIG:-}" | grep -qE '^(ezviz_cs-w3-wd1200g|k2p|wr1200js)\.config$'; then
+if echo "${TARGET_CONFIG:-}" | grep -qE '^(ezviz_cs-w3-wd1200g|k2p|wr1200js|zte_e8821)\.config$'; then
   echo "==> [16b] ${TARGET_CONFIG%%.config}：注入 xray 内存保险 + zram"
   mkdir -p files/etc/init.d files/etc/uci-defaults
   cat > files/etc/init.d/zramswap <<'ZRAMEOF'
@@ -796,7 +796,7 @@ UCIEOF
   chmod +x files/etc/uci-defaults/99-xray-memopt
   echo "  已注入 zramswap(32MB) + 99-xray-memopt（GOGC=75 GOMEMLIMIT=32MiB）"
 else
-  echo "==> [16b] 非 ezviz/k2p/wr1200js 机型，跳过内存保险注入"
+  echo "==> [16b] 非 ezviz/k2p/wr1200js/zte_e8821 机型，跳过内存保险注入"
 fi
 
 # ---------------------------------------------------------------------------
@@ -813,7 +813,7 @@ fi
 #   兜底：已含 bufferSize 则跳过（幂等）；找不到锚点则报错退出，绝不瞎写。
 #   门控机型：128MB 内存 + 跑 xray 的三台（ezviz / k2p / wr1200js）。
 # ---------------------------------------------------------------------------
-if echo "${TARGET_CONFIG:-}" | grep -qE '^(ezviz_cs-w3-wd1200g|k2p|wr1200js)\.config$'; then
+if echo "${TARGET_CONFIG:-}" | grep -qE '^(ezviz_cs-w3-wd1200g|k2p|wr1200js|zte_e8821)\.config$'; then
   echo "==> [16c] ${TARGET_CONFIG%%.config}：注入 xray bufferSize 内存瘦身"
   GEN="package/helloworld/luci-app-ssr-plus/root/usr/share/shadowsocksr/gen_config.lua"
   if [ ! -f "$GEN" ]; then
@@ -850,7 +850,7 @@ PYEOF
   [ $? -ne 0 ] && { echo "  !! 错误：gen_config.lua 补丁失败"; exit 1; }
   grep -n -A 3 "bufferSize" "$GEN" | head -12 | sed 's/^/     /'
 else
-  echo "==> [16c] 非 ezviz/k2p/wr1200js 机型，跳过 xray bufferSize 注入"
+  echo "==> [16c] 非 ezviz/k2p/wr1200js/zte_e8821 机型，跳过 xray bufferSize 注入"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1154,7 +1154,7 @@ fi
 # ⚠️ 顺序前提：本段必须在 `make defconfig` 之前跑（diy-part2 正好在 feeds install
 #    之后、defconfig 之前），否则依赖变更不生效。
 # ===========================================================================
-if echo "${TARGET_CONFIG:-}" | grep -qE '^(k2p|ezviz_cs-w3-wd1200g|wr1200js)\.config$'; then
+if echo "${TARGET_CONFIG:-}" | grep -qE '^(k2p|ezviz_cs-w3-wd1200g|wr1200js|zte_e8821)\.config$'; then
   echo "==> [20] 小闪存 16M 机型体积瘦身（${TARGET_CONFIG}）：为 luci-app-ngrokc 腾空间"
   SSRP_MK="package/helloworld/luci-app-ssr-plus/Makefile"
   MT7621_TMK="target/linux/ramips/mt7621/target.mk"
@@ -1420,4 +1420,166 @@ MTWIFI_EOF
   echo "==> [24] K2P mtwifi-up 注入完成"
 else
   echo "==> [24] 非 K2P 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 mtwifi 开机拉起注入"
+fi
+
+# ===========================================================================
+# [25] ZTE E8821（ath79/qca9563，16MB SPI NOR）设备移植注入
+# ---------------------------------------------------------------------------
+# 上游 openwrt-18.06-k5.4 的 ath79 里**没有这台机器**，需要四处落地：
+#   ① DTS       scripts/qca9563_zte_e8821.dts → target/linux/ath79/dts/
+#   ② 设备定义  ath79/image/generic.mk 追加 define Device/zte_e8821
+#   ③ 端口映射  ath79/generic/base-files/etc/board.d/02_network 追加 zte,e8821 分支
+#   ④ 5G 校准   ath79/generic/base-files/etc/hotplug.d/firmware/11-ath10k-caldata
+#               把 zte,e8821 并进 asus,rp-ac66 / yuncore,a770 那一组（art 0x5000 / 0x844）
+#
+# 为什么 DTS 抄 XD3200 而不是 XD4200（两者在 OpenWrt master 里是 dtsi 继承关系）：
+#   XD3200 只覆盖 4 处，其中决定性的一处是把 5G 校准源从 pre-calibration(0x2f20)
+#   换成 calibration(0x844)——因为它的 5G 是 9880/9882（固件包 ath10k-firmware-qca988x-ct），
+#   而 XD4200 是 9886/9888（qca9888-ct）。E8821 的 5G 是 **QCA9882**，属前者。
+#   校准长度搞错（0x844 vs 0x2f20）的后果是 5G 起不来或功率异常，而编译完全不报错。
+#
+# ④ 为什么不能并进 yuncore,a782|yuncore,xd4200 那一组：那组是 pre-cal + 0x2f20，
+#   还会给 QCA9888/hw2.0/board.bin 建符号链接，9882 按那套加载必失败。
+#
+# 全部操作幂等；任何一处锚点不唯一或写后自检失败即 exit 1，
+# 避免产出「能开机、5G 没有 / 网口全不通」却表面正常的固件。
+# ===========================================================================
+if echo "${TARGET_CONFIG:-}" | grep -qE '^zte_e8821\.config$'; then
+  echo "==> [25] ZTE E8821：注入 DTS / generic.mk / 02_network / 11-ath10k-caldata"
+
+  DTS_SRC="../scripts/qca9563_zte_e8821.dts"
+  DTS_DST="target/linux/ath79/dts/qca9563_zte_e8821.dts"
+  if [ ! -f "$DTS_SRC" ]; then
+    echo "  !! 错误：缺少 $DTS_SRC"; exit 1
+  fi
+  if [ ! -d "target/linux/ath79/dts" ]; then
+    echo "  !! 错误：target/linux/ath79/dts 不存在 —— 本分支不是 ath79 结构？"; exit 1
+  fi
+  cp "$DTS_SRC" "$DTS_DST"
+  echo "  ① DTS: $DTS_SRC -> $DTS_DST（$(grep -c '' "$DTS_DST") 行）"
+
+  python3 - <<'PYEOF'
+import sys, re
+
+def rd(p):
+    return open(p, encoding="utf-8").read()
+
+def wr(p, s):
+    open(p, "w", encoding="utf-8").write(s)
+
+# ---------------- ② image/generic.mk ----------------
+MK = "target/linux/ath79/image/generic.mk"
+s = rd(MK)
+d0 = len(re.findall(r"^define ", s, re.M))
+e0 = len(re.findall(r"^endef", s, re.M))
+if "define Device/zte_e8821" in s:
+    print("  ② generic.mk: 已存在 Device/zte_e8821，跳过（幂等）")
+else:
+    if not s.endswith("\n"):
+        s += "\n"
+    s += (
+        "\ndefine Device/zte_e8821\n"
+        "  SOC := qca9563\n"
+        "  DEVICE_VENDOR := ZTE\n"
+        "  DEVICE_MODEL := E8821\n"
+        "  DEVICE_PACKAGES := kmod-ath10k-ct-smallbuffers ath10k-firmware-qca988x-ct -uboot-envtools\n"
+        "  IMAGE_SIZE := 16000k\n"
+        "endef\n"
+        "TARGET_DEVICES += zte_e8821\n"
+    )
+    wr(MK, s)
+    print("  ② generic.mk: 已追加 define Device/zte_e8821（IMAGE_SIZE 16000k）")
+
+s = rd(MK)
+d1 = len(re.findall(r"^define ", s, re.M))
+e1 = len(re.findall(r"^endef", s, re.M))
+if (d1 - d0) not in (0, 1) or (e1 - e0) != (d1 - d0):
+    print("  !! 错误：generic.mk define/endef 增量异常 %d/%d -> %d/%d" % (d0, e0, d1, e1))
+    sys.exit(1)
+for need in ["define Device/zte_e8821", "TARGET_DEVICES += zte_e8821",
+             "IMAGE_SIZE := 16000k", "kmod-ath10k-ct-smallbuffers",
+             "ath10k-firmware-qca988x-ct", "-uboot-envtools"]:
+    if need not in s:
+        print("  !! 错误：generic.mk 写入后仍缺 '%s'" % need)
+        sys.exit(1)
+
+# ---------------- ③ 02_network ----------------
+NET = "target/linux/ath79/generic/base-files/etc/board.d/02_network"
+s = rd(NET)
+if "zte,e8821)" in s:
+    print("  ③ 02_network: 已存在 zte,e8821 分支，跳过（幂等）")
+else:
+    anchor = '\t*)\n\t\tucidef_set_interfaces_lan_wan "eth0" "eth1"'
+    n = s.count(anchor)
+    if n != 1:
+        print("  !! 错误：02_network 的 ath79_setup_interfaces 兜底锚点出现 %d 次（预期 1）" % n)
+        sys.exit(1)
+    block = (
+        "\tzte,e8821)\n"
+        '\t\tucidef_add_switch "switch0" \\\n'
+        '\t\t\t"0@eth0" "1:lan" "2:lan" "3:lan" "4:lan" "5:wan"\n'
+        "\t\t;;\n"
+    )
+    s = s.replace(anchor, block + anchor, 1)
+    wr(NET, s)
+    print("  ③ 02_network: 已插入 zte,e8821 → 5 口 QCA8337N（0@eth0 + PHY1~5）")
+
+# 自检：分支必须落在 ath79_setup_interfaces 里，且 switch0 行完整
+s = rd(NET)
+i = s.find("\tzte,e8821)")
+j = s.find("\n\t\t;;", i)
+if i < 0 or j < 0:
+    print("  !! 错误：02_network 写入后找不到 zte,e8821 分支边界")
+    sys.exit(1)
+frag = s[i:j]
+# 0@eth0（CPU/SGMII 口）+ PHY1~5 共五个物理口，缺任何一个都会导致对应网口不通
+for need in ['"0@eth0"', '"1:lan"', '"2:lan"', '"3:lan"', '"4:lan"', '"5:wan"']:
+    if need not in frag:
+        print("  !! 错误：02_network 的 zte,e8821 分支缺 %s" % need)
+        sys.exit(1)
+
+# ---------------- ④ 11-ath10k-caldata ----------------
+CAL = "target/linux/ath79/generic/base-files/etc/hotplug.d/firmware/11-ath10k-caldata"
+s = rd(CAL)
+if "zte,e8821" in s:
+    print("  ④ 11-ath10k-caldata: 已存在 zte,e8821，跳过（幂等）")
+else:
+    anchor = "\tyuncore,a770)\n"
+    n = s.count(anchor)
+    if n != 1:
+        print("  !! 错误：11-ath10k-caldata 里 'yuncore,a770)' 出现 %d 次（预期 1）" % n)
+        sys.exit(1)
+    # 插在该组成员列表末尾：把 "yuncore,a770)" 变成 "zte,e8821|\n\tyuncore,a770)"
+    s = s.replace(anchor, "\tzte,e8821|\\\n" + anchor, 1)
+    wr(CAL, s)
+    print("  ④ 11-ath10k-caldata: zte,e8821 已并入 0x844 组（art 0x5000）")
+
+# 自检：必须位于 ath10k/cal-pci-0000:00:00.0.bin 那个 case 内，且不得出现在 pre-cal 组
+s = rd(CAL)
+i = s.find("\tzte,e8821|\\\n")
+if i < 0:
+    print("  !! 错误：11-ath10k-caldata 写入后找不到 zte,e8821 行")
+    sys.exit(1)
+head = s[:i]
+cur_case = head.rfind('"ath10k/')
+case_name = head[cur_case:cur_case + 60].split("\n")[0]
+if "cal-pci-0000:00:00.0.bin" not in case_name:
+    print("  !! 错误：zte,e8821 被插到了错误的 case 块：%s" % case_name)
+    print("     必须是 ath10k/cal-pci-0000:00:00.0.bin（9880/9882 的 cal 格式）")
+    sys.exit(1)
+if "0x2f20" in s[i:i + 400]:
+    print("  !! 错误：zte,e8821 所在分组用了 0x2f20（那是 9886/9888 的 pre-cal）")
+    sys.exit(1)
+print("  自检通过：zte,e8821 位于 %s 的 0x844 分组" % case_name.strip())
+PYEOF
+  [ $? -ne 0 ] && { echo "  !! 错误：E8821 设备移植注入失败"; exit 1; }
+
+  echo "  --- 落地结果 ---"
+  grep -n -A 7 'define Device/zte_e8821' target/linux/ath79/image/generic.mk | sed 's/^/     /'
+  grep -n -A 4 'zte,e8821)' target/linux/ath79/generic/base-files/etc/board.d/02_network | sed 's/^/     /'
+  grep -n -B 1 -A 3 'zte,e8821' \
+    target/linux/ath79/generic/base-files/etc/hotplug.d/firmware/11-ath10k-caldata | sed 's/^/     /'
+  echo "==> [25] E8821 注入完成"
+else
+  echo "==> [25] 非 E8821 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 ath79 设备移植注入"
 fi

@@ -85,9 +85,13 @@ echo "==> helloworld 已就绪，luci-app-ssr-plus 来自：package/helloworld/l
 #       开源 mt76 双芯片：MT7603E(2.4G) + MT7612E(5G)，上游本来就是开源驱动，无闭源可换。
 #       相对 k2p 少了 mt7615 的独立 firmware 包、且去掉了 dropbear/opkg，但同属 16MB 档，
 #       必须一起 pin（走 master 最新 xray v26 会直接撑爆 15.7MiB 的 firmware 分区）。
+#   zte_e8821.config    —— 中兴 E8821（ath79/qca9563，16MB SPI NOR 硬改 / 128MB DDR2）。
+#       QCA9563 内置 2.4G + QCA9882(PCIe 5G) + QCA8337N 五口。5G 固件 qca988x-ct 本身
+#       ~0.6MiB 且压缩率低，与 xray 一起装必须 pin；否则 master 的 xray v26（squashfs 内
+#       ~7.5MiB）在 16000k 分区里连 1MiB overlay 都留不出来。
 # ⚠️ 这里必须写精确名：早期写成 *k2p*，会把 23.05 的 phicomm_k2p-32m.config（32MB，
 #    本来该走 master 最新 xray）一起 pin 到 a201839 + 旧 xray，属于误伤。
-SMALL_FLASH_PATTERNS="a3004ns-dual.config k2p.config ezviz_cs-w3-wd1200g.config wr1200js.config"
+SMALL_FLASH_PATTERNS="a3004ns-dual.config k2p.config ezviz_cs-w3-wd1200g.config wr1200js.config zte_e8821.config"
 PIN_COMMIT="a201839"
 
 if [ -n "$SMALL_FLASH_PATTERNS" ] && [ -n "$PIN_COMMIT" ]; then
@@ -271,6 +275,44 @@ case "$TARGET_CONFIG" in
     done
     echo "    OK：mt7603 / mt76x2 / mt76x2-common / mt76-core 齐备"
     echo "    mt76 版本：$(grep -m1 '^PKG_SOURCE_DATE:=' "$MT76_MK" | cut -d= -f2)"
+    ;;
+  *zte_e8821*)
+    # E8821：ath79/QCA9563 + 5G QCA9882（PCIe，ath10k-ct + qca988x-ct 固件）。
+    # 这一段的价值是「5 分钟内失败」：本分支若缺 ath10k-ct 的 smallbuffers 变体、
+    # 或缺 qca988x 固件包，编出来会是「能开机、5G 没有」——不报错，最难查。
+    echo "==> E8821：校验本分支的 ath10k-ct（含 smallbuffers 变体）与 qca988x 固件"
+    ATH10K_MK="package/kernel/ath10k-ct/Makefile"
+    ATH10K_FW_MK="package/firmware/ath10k-ct-firmware/Makefile"
+    ATH79_IMG_MK="target/linux/ath79/image/generic.mk"
+    ATH79_CAL="target/linux/ath79/generic/base-files/etc/hotplug.d/firmware/11-ath10k-caldata"
+    ATH79_NET="target/linux/ath79/generic/base-files/etc/board.d/02_network"
+    for f in "$ATH10K_MK" "$ATH10K_FW_MK" "$ATH79_IMG_MK" "$ATH79_CAL" "$ATH79_NET" \
+             "target/linux/ath79/dts/qca956x.dtsi"; do
+      if [ ! -f "$f" ]; then
+        echo "!! 错误：$f 不存在 —— 本分支的 ath79 结构不符合预期，无法移植 E8821"
+        exit 1
+      fi
+    done
+    for sym in "KernelPackage/ath10k-ct" "KernelPackage/ath10k-ct-smallbuffers"; do
+      if ! grep -q "^define $sym\$" "$ATH10K_MK"; then
+        echo "!! 错误：$ATH10K_MK 里没有 define $sym"
+        echo "   没有 smallbuffers 变体就不能按用户要求走小缓冲方案；"
+        echo "   此时请把 config 里的 kmod-ath10k-ct-smallbuffers 改回 kmod-ath10k-ct。"
+        exit 1
+      fi
+    done
+    if ! grep -q "^define Package/ath10k-firmware-qca988x-ct\$" "$ATH10K_FW_MK"; then
+      echo "!! 错误：$ATH10K_FW_MK 里没有 Package/ath10k-firmware-qca988x-ct"
+      echo "   E8821 的 5G 是 QCA9882（qca988x 族），固件包名必须带 qca988x。"
+      exit 1
+    fi
+    # 校准落点必须存在锚点机型：zte,e8821 会被 diy-part2 [25] 段插进 asus,rp-ac66 那一组
+    if ! grep -q 'asus,rp-ac66' "$ATH79_CAL"; then
+      echo "!! 错误：$ATH79_CAL 里找不到 asus,rp-ac66 分组锚点，无法确定 0x844 校准该插到哪"
+      exit 1
+    fi
+    echo "    OK：ath10k-ct(+smallbuffers) / ath10k-firmware-qca988x-ct / ath79 结构 齐备"
+    echo "    ath10k-ct 版本：$(grep -m1 '^PKG_SOURCE_DATE:=' "$ATH10K_MK" | cut -d= -f2)"
     ;;
 esac
 
