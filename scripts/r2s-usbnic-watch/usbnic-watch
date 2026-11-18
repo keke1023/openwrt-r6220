@@ -1,0 +1,195 @@
+#!/bin/sh
+# /usr/sbin/usbnic-watch
+#
+# NanoPi R2S 的第二个网口（eth1 / WAN）是 USB3 上的 RTL8153B（0bda:8153）。
+# 这颗芯片偶发「整个接口消失」，且因为板上 5V 直连 DC-in（无可控 VBUS
+# regulator），软重启无法给它下电，必须拔电才能恢复。
+#
+# 本脚本做两件事：
+#   1) 掉线瞬间把现场证据落到持久目录（/root/usbnic-log），重启不丢 —— 用来
+#      判定芯片到底还挂在 USB 总线上（能枚举）还是彻底掉总线（硬锁死）
+#   2) 按力度递增尝试三步软件恢复，并记录哪一步生效
+#        ① authorized 0/1 重新枚举（设备仍在总线上时有效）
+#        ② xhci-hcd 控制器 unbind/bind（主机侧挂着时有效）
+#        ③ dwc3 控制器 unbind/bind（更狠，整条 USB3 重建）
+#      三步全失败 = 芯片硬锁死，只能断电，脚本会明确记一笔并退避。
+#
+# 配置：/etc/config/usbnic-watch（uci-defaults 首次启动自动生成并启用）
+#   uci set usbnic-watch.main.iface='eth1'
+#   uci set usbnic-watch.main.interval='10'
+#   uci set usbnic-watch.main.recover='1'     # 0 = 只取证不恢复
+#   uci set usbnic-watch.main.keep='10'       # 保留最近 N 次现场
+
+LOGDIR=/root/usbnic-log
+CFG=usbnic-watch.main
+NIC_ID=0bda:8153
+
+cfg() {
+	local v
+	v=$(uci -q get "$CFG.$1" 2>/dev/null)
+	[ -n "$v" ] || v="$2"
+	echo "$v"
+}
+
+IFACE=$(cfg iface eth1)
+INTERVAL=$(cfg interval 10)
+RECOVER=$(cfg recover 1)
+KEEP=$(cfg keep 10)
+
+log() { logger -t usbnic-watch "$*"; }
+
+# 网口在不在（看着 sysfs 与 ip link 双确认；设备掉总线时 /sys/class/net/eth1 直接消失）
+nic_up() {
+	[ -d "/sys/class/net/$IFACE" ] || return 1
+	ip link show "$IFACE" >/dev/null 2>&1 || return 1
+	return 0
+}
+
+usb_ids() {
+	for d in /sys/bus/usb/devices/*/; do
+		[ -e "$d/idVendor" ] || continue
+		printf '%s  %s:%s  %s\n' "$(basename "$d")" \
+			"$(cat "$d/idVendor" 2>/dev/null)" \
+			"$(cat "$d/idProduct" 2>/dev/null)" \
+			"$(cat "$d/product" 2>/dev/null)"
+	done
+}
+
+# 抓现场，返回目录名
+snapshot() {
+	_tag="$1"
+	_ts=$(date +%Y%m%d-%H%M%S)
+	_d="$LOGDIR/$_ts-$_tag"
+	mkdir -p "$_d" 2>/dev/null || return 1
+	{
+		echo "== tag =="; echo "$_tag"
+		echo "== date =="; date
+		echo "== uptime =="; uptime
+		echo "== iface =="; echo "$IFACE"
+		echo "== ip link =="; ip -o link show 2>&1
+		echo "== ip -4 addr =="; ip -o -4 addr show 2>&1
+		echo "== /sys/class/net =="; ls -l /sys/class/net/ 2>&1
+		echo "== usb devices（等效 lsusb）=="; usb_ids
+		echo "== usb 省电状态 =="
+		for x in /sys/bus/usb/devices/*/; do
+			[ -d "$x" ] || continue
+			printf '%s  control=%s  delay=%s  authorized=%s\n' "$(basename "$x")" \
+				"$(cat "$x/power/control" 2>/dev/null)" \
+				"$(cat "$x/power/autosuspend_delay_ms" 2>/dev/null)" \
+				"$(cat "$x/authorized" 2>/dev/null)"
+		done
+		echo "== platform usb 驱动绑定 =="
+		ls /sys/bus/platform/drivers/dwc3/ 2>&1 | grep -E '^[0-9a-f]+\.usb$'
+		ls /sys/bus/platform/drivers/xhci-hcd/ 2>&1 | grep -E '^xhci-hcd\.'
+		echo "== dmesg 尾部 =="; dmesg 2>&1 | tail -300
+	} > "$_d/report.txt" 2>&1
+	echo "$_d"
+}
+
+prune() {
+	_n=0
+	for _x in $(ls -1dt "$LOGDIR"/*/ 2>/dev/null); do
+		_n=$((_n + 1))
+		[ "$_n" -gt "$KEEP" ] && rm -rf "$_x"
+	done
+}
+
+# ① 重新枚举：设备还在总线上时有效
+try_authorized() {
+	_found=0
+	for x in /sys/bus/usb/devices/*/; do
+		[ -e "$x/idVendor" ] || continue
+		[ "$(cat "$x/idVendor" 2>/dev/null):$(cat "$x/idProduct" 2>/dev/null)" = "$NIC_ID" ] || continue
+		[ -e "$x/authorized" ] || continue
+		_found=1
+		echo 0 > "$x/authorized" 2>/dev/null
+		sleep 2
+		echo 1 > "$x/authorized" 2>/dev/null
+	done
+	[ "$_found" = "1" ] || return 2
+	sleep 8
+	nic_up && return 0 || return 1
+}
+
+# ② 复位 xHCI（主机侧控制器挂着时有效）
+try_xhci() {
+	_dev=""
+	for f in /sys/bus/platform/drivers/xhci-hcd/xhci-hcd.*; do
+		[ -e "$f" ] || continue
+		_dev=$(basename "$f")
+		break
+	done
+	[ -n "$_dev" ] || return 2
+	log "  复位 xhci：$_dev"
+	echo "$_dev" > /sys/bus/platform/drivers/xhci-hcd/unbind 2>/dev/null
+	sleep 3
+	echo "$_dev" > /sys/bus/platform/drivers/xhci-hcd/bind 2>/dev/null
+	sleep 15
+	nic_up && return 0 || return 1
+}
+
+# ③ 复位 dwc3（整条 USB3 重建，最重的一步）
+try_dwc3() {
+	_dev=""
+	for f in /sys/bus/platform/drivers/dwc3/*.usb; do
+		[ -e "$f" ] || continue
+		_dev=$(basename "$f")
+		break
+	done
+	[ -n "$_dev" ] || return 2
+	log "  复位 dwc3：$_dev"
+	echo "$_dev" > /sys/bus/platform/drivers/dwc3/unbind 2>/dev/null
+	sleep 3
+	echo "$_dev" > /sys/bus/platform/drivers/dwc3/bind 2>/dev/null
+	sleep 20
+	nic_up && return 0 || return 1
+}
+
+mkdir -p "$LOGDIR"
+log "启动：iface=$IFACE interval=${INTERVAL}s recover=$RECOVER keep=$KEEP"
+
+# 开机就没起来（芯片冷启动失败）也要留证
+sleep 30
+if ! nic_up; then
+	_d=$(snapshot boot-missing)
+	log "开机 30s 时 $IFACE 仍缺失，现场：$_d"
+fi
+
+while :; do
+	sleep "$INTERVAL"
+	nic_up && continue
+	_d=$(snapshot missing)
+	log "$IFACE 消失！现场：$_d"
+	if [ "$RECOVER" != "1" ]; then
+		sleep 600
+		continue
+	fi
+	_step=""
+	if try_authorized; then
+		_step="authorized-reenumerate"
+	elif try_xhci; then
+		_step="xhci-hcd-rebind"
+	elif try_dwc3; then
+		_step="dwc3-rebind"
+	fi
+	{
+		echo
+		echo "== 恢复结果 =="
+		if [ -n "$_step" ]; then
+			echo "recovered by: $_step"
+			date
+			ip -o link show 2>&1
+			usb_ids
+		else
+			echo "failed: 三步（authorized / xhci / dwc3）均无效"
+			echo "判定：芯片已从 USB 总线掉线且不响应复位 → 硬锁死，需断电"
+		fi
+	} >> "$_d/report.txt" 2>&1
+	if [ -n "$_step" ]; then
+		log "恢复成功（$_step），现场：$_d"
+	else
+		log "三步恢复均失败 → 疑似芯片硬锁死，需断电。现场：$_d"
+		sleep 600
+	fi
+	prune
+done

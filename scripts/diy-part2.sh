@@ -1670,3 +1670,63 @@ PYEOF
 else
   echo "==> [26] 非 R2S 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 rtl8153b-2 固件回退"
 fi
+
+# 27) NanoPi R2S：USB 网口守护（掉线取证 + 分级恢复）
+#     背景：R2S 的 eth1（WAN）是 USB3 上的 RTL8153B（0bda:8153）。这颗芯片偶发
+#     「整个接口消失」，且软重启救不回、必须拔电。从镜像 DTB 核实到两条硬事实：
+#       - dwc3 节点已带 snps,dis_u2_susphy_quirk / dis_u3_susphy_quirk /
+#         dis_enblslpm_quirk → SoC 侧 PHY suspend 与 LPM 本就关闭
+#       - 板上没有任何可控 USB VBUS regulator（regulator 全 always-on，
+#         dwc3 无 vbus-supply）→ 软重启时 VBUS 不掉，芯片内部状态原样存活，
+#         这就是「软重启无效、必须断电」的成因
+#     要让下一次偶发故障可定性，只靠人守着抓现场不现实，故随固件带上守护：
+#       ① 掉线瞬间落证到 /root/usbnic-log（持久，重启不丢）：等效 lsusb 全量、
+#          usb 省电状态、platform 驱动绑定、dmesg 尾部 300 行
+#       ② 按力度递增三步恢复并记录哪步生效：
+#          authorized 0/1 → xhci-hcd unbind/bind → dwc3 unbind/bind
+#          三步全失败即判定芯片硬锁死（需断电），退避 600s 防日志刷爆
+#     判读：故障瞬间 lsusb 里还能看到 0bda:8153 → 卡在 probe/patch 装载层（可救，
+#           fw 回退可能有效）；看不到 → 芯片掉总线硬锁死（patch 轮不到执行，fw
+#           回退无法解决，只能靠不再触发）
+#     可用 uci 关掉：uci set usbnic-watch.main.enabled='0' && uci commit
+if echo "${TARGET_CONFIG:-}" | grep -qE '^friendlyarm_nanopi-r2s\.config$'; then
+  echo "==> [27] NanoPi R2S：USB 网口守护（掉线取证 + 三步恢复）"
+  UNW_SRC="../scripts/r2s-usbnic-watch"
+  for f in usbnic-watch usbnic-watch.init 99-usbnic-watch; do
+    if [ ! -f "$UNW_SRC/$f" ]; then
+      echo "  !! 错误：缺少 $UNW_SRC/$f"; exit 1
+    fi
+  done
+  mkdir -p files/usr/sbin files/etc/init.d files/etc/uci-defaults
+  cp -f "$UNW_SRC/usbnic-watch"          files/usr/sbin/usbnic-watch
+  cp -f "$UNW_SRC/usbnic-watch.init"     files/etc/init.d/usbnic-watch
+  cp -f "$UNW_SRC/99-usbnic-watch"       files/etc/uci-defaults/99-usbnic-watch
+  chmod 755 files/usr/sbin/usbnic-watch files/etc/init.d/usbnic-watch \
+            files/etc/uci-defaults/99-usbnic-watch
+
+  # 语法自检 + 关键锚点自检（改坏了就别出固件）
+  for f in files/usr/sbin/usbnic-watch files/etc/init.d/usbnic-watch \
+           files/etc/uci-defaults/99-usbnic-watch; do
+    if ! sh -n "$f" 2>/dev/null; then
+      echo "  !! 错误：$f 语法不通过"; exit 1
+    fi
+  done
+  for k in 'NIC_ID=0bda:8153' 'dwc3/unbind' 'xhci-hcd/unbind' \
+           'usbnic-log' 'authorized'; do
+    if ! grep -qF "$k" files/usr/sbin/usbnic-watch; then
+      echo "  !! 错误：usbnic-watch 缺少关键实现 '$k'"; exit 1
+    fi
+  done
+  # 必须是「设备不在才动手」，绝不能无条件 unbind
+  if ! sed -n '/^while :; do/,/^done/p' files/usr/sbin/usbnic-watch | grep -q 'nic_up && continue'; then
+    echo "  !! 错误：主循环缺少 'nic_up && continue' 保护，可能出现无条件复位"; exit 1
+  fi
+
+  echo "  ① /usr/sbin/usbnic-watch（取证 + authorized→xhci→dwc3 三级恢复）"
+  echo "  ② /etc/init.d/usbnic-watch + /etc/uci-defaults/99-usbnic-watch（首启自动启用）"
+  ls -l files/usr/sbin/usbnic-watch files/etc/init.d/usbnic-watch \
+        files/etc/uci-defaults/99-usbnic-watch | sed 's/^/     /'
+  echo "==> [27] R2S USB 网口守护注入完成"
+else
+  echo "==> [27] 非 R2S 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 USB 网口守护"
+fi

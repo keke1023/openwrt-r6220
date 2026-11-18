@@ -1,0 +1,17 @@
+#!/bin/sh
+# /etc/uci-defaults/99-usbnic-watch
+# 首次启动生成配置并启用 USB 网口守护（执行后 uci-defaults 会自行删除本文件）。
+
+if [ -z "$(uci -q get usbnic-watch.main.iface)" ]; then
+	touch /etc/config/usbnic-watch
+	uci set usbnic-watch.main=usbnic-watch
+	uci set usbnic-watch.main.enabled='1'
+	uci set usbnic-watch.main.iface='eth1'
+	uci set usbnic-watch.main.interval='10'
+	uci set usbnic-watch.main.recover='1'
+	uci set usbnic-watch.main.keep='10'
+	uci commit usbnic-watch
+fi
+
+/etc/init.d/usbnic-watch enable 2>/dev/null
+exit 0
