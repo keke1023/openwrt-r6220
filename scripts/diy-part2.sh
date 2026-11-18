@@ -1583,3 +1583,90 @@ PYEOF
 else
   echo "==> [25] 非 E8821 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 ath79 设备移植注入"
 fi
+
+# 26) NanoPi R2S：rtl8153b-2 的 NIC patch 固件回退到 2019-10-23 的 v1
+#     ⚠️ 先纠正一个极易误判的点：`rtl8153b-2 v2 04/27/23` **不是驱动版本**。
+#     驱动本体是内核树内 drivers/net/usb/r8152.c（本分支 = v1.12.13，
+#     ko 里 strings 可见），ethtool -i / dmesg 里那个带日期的串来自固件文件
+#     /lib/firmware/rtl_nic/rtl8153b-2.fw —— r8152 在 probe 时把这份 patch
+#     写进 RTL8153B 的 RAM：
+#       v2 04/27/23 = 1880B：usb_patch_code_20220823 + plamcu_patch_code_20220609
+#       v1 10/23/19 = 1088B：usb_patch_code_20190906 + plamcu_patch_code_20190408_0
+#     23.05 的 linux-firmware(20230804) 带的是 v2；友善 R2S 官方固件长期用 v1。
+#     部分 RTL8153B 在 v2 patch 下会出现链路掉线 / 大流量断流，故按官方基线回退。
+#     来源：linux-firmware b27d12383e「rtl_nic: add firmware files for RTL8153」
+#           （2019-10-23）；v2 是 e88bdbe4b5「update firmware of USB devices」
+#           （2023-04-27）那次更新。
+#     落地两处（缺一不可）：
+#       ① files/lib/firmware/rtl_nic/ —— rootfs overlay，最后覆盖，opkg 重装也压得住
+#       ② package/firmware/linux-firmware/{files/,realtek.mk} —— 让 r8152-firmware
+#          这个 opkg 包自身装的就是旧版，opkg 数据库与磁盘内容一致
+if echo "${TARGET_CONFIG:-}" | grep -qE '^friendlyarm_nanopi-r2s\.config$'; then
+  echo "==> [26] NanoPi R2S：rtl8153b-2 固件回退到 v1(2019/10/23)"
+  FW_SRC="../scripts/firmware/rtl8153b-2.fw"
+  if [ ! -f "$FW_SRC" ]; then
+    echo "  !! 错误：缺少 $FW_SRC（旧版 rtl8153b-2 固件）"; exit 1
+  fi
+  FW_SIZE=$(wc -c < "$FW_SRC" | tr -d ' ')
+  if [ "$FW_SIZE" != "1088" ]; then
+    echo "  !! 错误：$FW_SRC 应为 1088 字节（v1 10/23/19），实际 $FW_SIZE"; exit 1
+  fi
+  if ! grep -aq 'rtl8153b-2 v1 10/23/19' "$FW_SRC"; then
+    echo "  !! 错误：$FW_SRC 里找不到版本串 'rtl8153b-2 v1 10/23/19'"; exit 1
+  fi
+  if grep -aq '04/27/23' "$FW_SRC"; then
+    echo "  !! 错误：$FW_SRC 里出现了 v2 的 '04/27/23'，拿错文件了"; exit 1
+  fi
+
+  # ① rootfs overlay
+  mkdir -p files/lib/firmware/rtl_nic
+  cp -f "$FW_SRC" files/lib/firmware/rtl_nic/rtl8153b-2.fw
+  chmod 644 files/lib/firmware/rtl_nic/rtl8153b-2.fw
+  echo "  ① files/lib/firmware/rtl_nic/rtl8153b-2.fw（${FW_SIZE}B）"
+
+  # ② 让 r8152-firmware 包自身安装旧版
+  FW_RTK="package/firmware/linux-firmware/realtek.mk"
+  if [ -f "$FW_RTK" ]; then
+    mkdir -p package/firmware/linux-firmware/files
+    cp -f "$FW_SRC" package/firmware/linux-firmware/files/rtl8153b-2.fw
+    chmod 644 package/firmware/linux-firmware/files/rtl8153b-2.fw
+    python3 - "$FW_RTK" <<'PYEOF'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+if "rtl8153b-2.fw" in s:
+    print("  ② realtek.mk: 已含 rtl8153b-2.fw 覆盖行，跳过（幂等）")
+    sys.exit(0)
+m = re.search(r"(define Package/r8152-firmware/install\n)(.*?)(\nendef)", s, re.S)
+if not m:
+    print("  !! 错误：realtek.mk 里找不到 'define Package/r8152-firmware/install ... endef'")
+    sys.exit(1)
+ins = ("\n\t$(INSTALL_DATA) $(CURDIR)/files/rtl8153b-2.fw "
+       "$(1)/lib/firmware/rtl_nic/rtl8153b-2.fw")
+s = s[:m.end(2)] + ins + s[m.end(2):]
+open(p, "w").write(s)
+blk = re.search(r"define Package/r8152-firmware/install(.*?)\nendef",
+                open(p).read(), re.S).group(1)
+if "rtl8153b-2.fw" not in blk:
+    print("  !! 错误：插入后 r8152-firmware install 段里没有 rtl8153b-2.fw")
+    sys.exit(1)
+if blk.count("$(1)/lib/firmware/rtl_nic") < 2:
+    print("  !! 错误：插入位置异常，安装目标路径数量不对")
+    sys.exit(1)
+print("  ② realtek.mk: r8152-firmware 的 install 段已追加旧版 fw 覆盖")
+PYEOF
+    [ $? -ne 0 ] && { echo "  !! 错误：realtek.mk 注入失败"; exit 1; }
+  else
+    echo "  !! 警告：未找到 $FW_RTK，仅靠 files/ 覆盖（opkg 重装 r8152-firmware 会回退到 v2）"
+  fi
+
+  echo "  --- 落地结果 ---"
+  ls -l files/lib/firmware/rtl_nic/rtl8153b-2.fw | sed 's/^/     /'
+  grep -ao 'rtl8153b-2 v[0-9] [0-9/]*' files/lib/firmware/rtl_nic/rtl8153b-2.fw \
+    | sed 's/^/     版本串: /'
+  grep -ao 'u[sS][bB]_patch_code_[0-9]*' files/lib/firmware/rtl_nic/rtl8153b-2.fw \
+    | sed 's/^/     /'
+  echo "==> [26] R2S rtl8153b-2 固件回退完成"
+else
+  echo "==> [26] 非 R2S 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 rtl8153b-2 固件回退"
+fi
