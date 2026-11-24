@@ -1730,3 +1730,58 @@ if echo "${TARGET_CONFIG:-}" | grep -qE '^friendlyarm_nanopi-r2s\.config$'; then
 else
   echo "==> [27] 非 R2S 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 USB 网口守护"
 fi
+
+# 28) NanoPi R2S：回移 r8152「TX 队列假超时」修复（upstream 833dcd75d54f，2 行）
+#     实机日志（2026-11-24 13:34，uptime 30855s）的顺序很能说明问题：
+#       NETDEV WATCHDOG: eth1 (r8152): transmit queue 0 timed out
+#       → r8152 "Tx timeout" ×6（每 5s 一次）
+#       → "Tx status -2" ×4（URB 被 unlink，-ENOENT）
+#       → r8152-cfgselector "Device not responding to setup address" / -71
+#       → usb4-port1 "Cannot enable" → 掉总线 → "attempt power cycle"（空转）
+#     对照 pristine linux-5.15.198 的 drivers/net/usb/r8152.c 三条硬事实：
+#       · 全文 netif_trans_update 出现 0 次（没有这处刷新）
+#       · usb_queue_reset_device 全文件只有一处调用，就在 rtl8152_tx_timeout()
+#       · 队列被 netif_stop_queue() 后，write_bulk_callback → tx_bottom 仍会
+#         持续 submit URB，而 trans_start 只在 ndo_start_xmit 路径刷新
+#     ⇒ 满载时队列达阈值被 stop、URB 仍在飞，5s 后 watchdog 误判「发送卡死」，
+#       驱动唯一的自动复位路径被这个假告警触发，而 RTL8153B 扛不住这次 USB 复位
+#       （板上无 VBUS 开关，复位后重新枚举失败就再也回不来 → 必须拔电）
+#     补丁：r8152_tx_agg_fill() 里 URB 提交成功后补 netif_trans_update()
+#     已在干净 5.15.198 源上 patch -p1 验证通过；与 hack-5.15 的
+#     760-net-usb-r8152-add-LED-configuration-from-OF.patch（只改 init 函数）
+#     无冲突
+if echo "${TARGET_CONFIG:-}" | grep -qE '^friendlyarm_nanopi-r2s\.config$'; then
+  echo "==> [28] R2S：回移 r8152 TX 队列假超时修复（upstream 833dcd75d54f）"
+  KP_SRC="../scripts/kernel-patches/990-r8152-tx-timeout-netif-trans-update.patch"
+  if [ ! -f "$KP_SRC" ]; then
+    echo "  !! 错误：缺少 $KP_SRC"; exit 1
+  fi
+  if ! grep -q 'netif_trans_update(tp->netdev)' "$KP_SRC"; then
+    echo "  !! 错误：补丁里缺少 netif_trans_update 插入行"; exit 1
+  fi
+  if ! grep -q 'usb_autopm_put_interface_async(tp->intf)' "$KP_SRC"; then
+    echo "  !! 错误：补丁里缺少上下文行（usb_autopm_put_interface_async）"; exit 1
+  fi
+  if ! grep -q 'drivers/net/usb/r8152.c' "$KP_SRC"; then
+    echo "  !! 错误：补丁头部路径不是 drivers/net/usb/r8152.c"; exit 1
+  fi
+
+  KP_DIR="target/linux/generic/pending-5.15"
+  if [ -d "$KP_DIR" ]; then
+    KP_DEST="$KP_DIR/990-r8152-tx-timeout-netif-trans-update.patch"
+    if [ -f "$KP_DEST" ]; then
+      echo "  已存在 $KP_DEST，跳过（幂等）"
+    else
+      cp -f "$KP_SRC" "$KP_DEST"
+      chmod 644 "$KP_DEST"
+      echo "  已注入 $KP_DEST"
+    fi
+    ls -l "$KP_DEST" | sed 's/^/     /'
+    grep -n 'netif_trans_update' "$KP_DEST" | sed 's/^/     /'
+  else
+    echo "  !! 警告：未找到 $KP_DIR（内核不是 5.15？），跳过该补丁"
+  fi
+  echo "==> [28] R2S r8152 假超时修复注入完成"
+else
+  echo "==> [28] 非 R2S 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 r8152 补丁"
+fi

@@ -1,0 +1,65 @@
+net: usb: r8152: fix transmit queue timeout
+
+Upstream commit 833dcd75d54f0bf5aa0a0781ff57456b421fbb40
+("net: usb: r8152: fix transmit queue timeout") by Mingj Ye,
+Reviewed-by: Hayes Wang <hayeswang@realtek.com>.
+
+Problem
+=======
+When the TX queue length reaches the threshold, rtl8152_start_xmit() calls
+netif_stop_queue().  Transmissions do not stop though: write_bulk_callback()
+-> tx_bottom() keeps calling r8152_tx_agg_fill() and submitting bulk-out URBs
+while there are queued skbs and free aggregations.
+
+Because ndo_start_xmit is no longer invoked while the queue is stopped,
+txq->trans_start stops being refreshed.  After watchdog_timeo (5s) the netdev
+watchdog treats an actively transmitting device as stalled and fires:
+
+    NETDEV WATCHDOG: eth1 (r8152): transmit queue 0 timed out
+    WARNING: CPU: ... at net/sched/sch_generic.c dev_watchdog
+
+That false alarm is destructive, because rtl8152_tx_timeout() unconditionally
+calls usb_queue_reset_device(), i.e. a USB port reset:
+
+    static void rtl8152_tx_timeout(struct net_device *netdev, unsigned int txqueue)
+    {
+            netif_warn(tp, tx_err, netdev, "Tx timeout\n");
+            usb_queue_reset_device(tp->intf);
+    }
+
+Some RTL8153B units do not survive that reset.  They stop answering
+SET_ADDRESS and drop off the bus:
+
+    r8152-cfgselector 4-1: Device not responding to setup address.
+    r8152-cfgselector 4-1: device not accepting address 2, error -71
+    usb usb4-port1: Cannot enable. Maybe the USB cable is bad?
+    usb usb4-port1: attempt power cycle
+
+On boards without a switchable VBUS regulator (NanoPi R2S: every regulator is
+regulator-always-on and the dwc3 node has no vbus-supply) the hub's power cycle
+request is a no-op, so the NIC stays dead until the board is physically
+unplugged -- and a soft reboot does not help either, because VBUS never drops.
+
+Fix
+===
+Refresh the transmit timestamp on every successful asynchronous URB submission
+in r8152_tx_agg_fill(), so the watchdog tracks actual transmission activity and
+only fires on a genuine stall.
+
+Backported to linux-5.15 (immortalwrt 23.05, 5.15.198) for
+friendlyarm_nanopi-r2s.  Verified against the pristine 5.15.198
+drivers/net/usb/r8152.c; does not collide with
+hack-5.15/760-net-usb-r8152-add-LED-configuration-from-OF.patch, which only
+touches the init functions.
+
+--- a/drivers/net/usb/r8152.c
++++ b/drivers/net/usb/r8152.c
+@@ -2339,6 +2339,8 @@ static int r8152_tx_agg_fill(struct r8152 *tp, struct tx_agg *agg)
+ 	ret = usb_submit_urb(agg->urb, GFP_ATOMIC);
+ 	if (ret < 0)
+ 		usb_autopm_put_interface_async(tp->intf);
++	else
++		netif_trans_update(tp->netdev);
+ 
+ out_tx_fill:
+ 	return ret;
