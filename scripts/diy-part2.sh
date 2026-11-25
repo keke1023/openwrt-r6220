@@ -1800,10 +1800,19 @@ fi
 #           枚举不回来（守护脚本三级恢复全失败也印证了这一点）。
 #     社区在 R2S / RTL8153 软路由上的一致经验：sg 打开时 r8152 的 TX 聚合在大流量
 #     下最易卡死，sg off 后基本不再复现。故随固件带 hotplug 调优：
-#       /etc/hotplug.d/net/25-usbnic-tune  按驱动名匹配 r8152 网口，
-#         sg off + tso off + gso off（默认开），可选关 PAUSE 流控（默认不动）
+#       /etc/hotplug.d/net/25-usbnic-tune  按驱动名匹配 r8152 网口
 #       /etc/uci-defaults/99-usbnic-tune   首启生成 /etc/config/usbnic-tune
-#     想拿回吞吐：uci set usbnic-tune.main.offload='0' && uci commit usbnic-tune
+#     【2026-11-25 修正】vendor 2.20.1 有两条 TX 路径：
+#       tx_bottom(): if (tp->sg_use) r8152_tx_agg_sg_fill()  ← scatterlist 零拷贝，
+#                                                            URB 完成前 skb 必须存活
+#                    else           r8152_tx_agg_fill()     ← skb_copy_bits 拷贝
+#     `tp->sg_use` **不受** `ethtool -K sg off` 控制（那只改 netdev->features），
+#     由 USB core probe 时按 usb_device_no_sg_constraint() 决定，真开关是驱动导出的
+#     sysfs `/sys/class/net/<if>/rtl_adv/sg_en`（写 disable）。所以脚本优先写 sg_en，
+#     仅在内树驱动（无 rtl_adv 目录）时退回 ethtool。
+#     同时把 TSO/GSO 拆成独立项并**默认保留**：关它会让 1Gbps 下 skb 数量涨 45 倍，
+#     是 CPU 开销大头；代理场景（xray/ss 已吃满 RK3328）会明显掉速。
+#     默认策略 = 最小必要干预：只关 SG。仍卡死再 `uci set usbnic-tune.main.tsogso='1'`。
 if echo "${TARGET_CONFIG:-}" | grep -qE '^friendlyarm_nanopi-r2s\.config$'; then
   echo "==> [29] NanoPi R2S：USB 网口 offload 调优注入"
   TUNE_SRC="../scripts/r2s-usbnic-tune"
@@ -1822,12 +1831,21 @@ if echo "${TARGET_CONFIG:-}" | grep -qE '^friendlyarm_nanopi-r2s\.config$'; then
       echo "  !! 错误：$f 语法不通过"; exit 1
     fi
   done
-  # 关键实现自检：必须按驱动名匹配、必须真的关 sg、必须可 uci 关掉
-  for k in '/sys/class/net/$INTERFACE/device/driver' '*/r8152)' 'sg off' 'usbnic-tune.main.'; do
+  # 关键实现自检：按驱动名匹配 / 真开关 rtl_adv/sg_en / 内树兜底 ethtool / 可 uci 关掉
+  for k in '/sys/class/net/$INTERFACE/device/driver' '*/r8152)' \
+           '/rtl_adv/sg_en' 'echo disable > "$SG_SYS"' \
+           'ethtool -K "$INTERFACE" sg off' 'usbnic-tune.main.'; do
     if ! grep -qF "$k" files/etc/hotplug.d/net/25-usbnic-tune; then
       echo "  !! 错误：25-usbnic-tune 缺少关键实现 '$k'"; exit 1
     fi
   done
+  # TSO/GSO 必须默认保留（关掉是 CPU 开销大头），只有 uci 显式打开才执行
+  if ! grep -qF 'cfg tsogso 0' files/etc/hotplug.d/net/25-usbnic-tune; then
+    echo "  !! 错误：tsogso 默认值必须是 0（默认保留 TSO/GSO）"; exit 1
+  fi
+  if ! grep -qF "set usbnic-tune.main.tsogso='0'" files/etc/uci-defaults/99-usbnic-tune; then
+    echo "  !! 错误：99-usbnic-tune 生成配置里 tsogso 默认必须是 0"; exit 1
+  fi
   ls -l files/etc/hotplug.d/net/25-usbnic-tune files/etc/uci-defaults/99-usbnic-tune | sed 's/^/     /'
   echo "  ethtool 在本镜像内由 config 的 CONFIG_PACKAGE_ethtool=y 提供（脚本已在无 ethtool 时安全退出）"
   echo "==> [29] R2S USB 网口 offload 调优注入完成"

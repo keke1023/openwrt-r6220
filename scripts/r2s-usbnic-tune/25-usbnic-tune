@@ -2,18 +2,38 @@
 # /etc/hotplug.d/net/25-usbnic-tune
 #
 # NanoPi R2S 的 eth1 是 USB3 上的 RTL8153B（0bda:8153）。这颗芯片在 r8152 驱动
-# 开启 Scatter/Gather + TSO 的情况下，大流量时会进入「发送队列卡死」：
+# 开启 Scatter/Gather 时，大流量会进入「发送队列卡死」：
 #   NETDEV WATCHDOG: eth1 (r8152): transmit queue 0 timed out
 #   r8152 4-1:1.0 eth1: Tx timeout  →  usb_queue_reset_device()  →  芯片复位
 # 而 rtl8152_tx_timeout() 是驱动里唯一会做 USB 端口复位的地方，这颗芯片经常扛不住
 # 那次复位（SET_ADDRESS 超时 / error -71 / Cannot enable），一掉总线就只能断电。
 #
-# 所以这里在网口就绪时把 offload 关掉，从源头降低触发概率。社区在 R2S / 同类
-# RTL8153 软路由上有大量一致反馈：sg off 后大流量 tx timeout 基本不再出现。
+# 为什么关 SG 有效：Realtek 官方 2.20.1 有两条 TX 路径
+#   tx_bottom(): if (tp->sg_use) r8152_tx_agg_sg_fill()   ← scatterlist 零拷贝，
+#                                                           URB 完成前 skb 必须存活
+#                else           r8152_tx_agg_fill()      ← skb_copy_bits 拷进
+#                                                           agg->head，skb 立即释放
+# 零拷贝路径把 skb 的生命周期绑到了 URB 上，一旦上层提前回收/改写就出问题；
+# 拷贝路径没有这个耦合，所以更稳。
+#
+# ！关键！ tp->sg_use 不受 `ethtool -K eth1 sg off` 控制 —— ethtool 只改
+# netdev->features（上层是否传 frags），驱动的 sg_use 由 USB core 在 probe 时
+# 按 usb_device_no_sg_constraint() 决定。真正的开关是驱动自己导出的 sysfs：
+#   /sys/class/net/<if>/rtl_adv/sg_en   （内容 enable / disable）
+# 实测：对 vendor 驱动写 ethtool sg off 不但没切到拷贝路径，还让上层多做一次
+# 线性化，纯负收益。所以这里优先写 sg_en，仅在内树驱动（无 rtl_adv）时退回 ethtool。
+#
+# CPU 代价说明（关这些 offload 换稳定性，值不值要看清）：
+#   sg_en=disable  → 每字节多一次 skb_copy_bits（1Gbps ≈ 125MB/s），单核约占 5~15%
+#   tso/gso=off    → skb 数量从「64KB 聚合」降到「1460B 每段」，1Gbps 下 45 倍，
+#                    这才是 CPU 开销的大头，代理场景（xray/ss 已吃满 CPU）会明显掉速
+# 故默认只关 SG（最小必要干预），TSO/GSO 默认保留。若仍卡死再把 tsogso 打开。
 #
 # 配置：/etc/config/usbnic-tune
-#   uci set usbnic-tune.main.offload='0'   # 想拿回吞吐就关掉本脚本的作用
-#   uci set usbnic-tune.main.flowctrl='1'  # 关以太网 PAUSE 流控（默认不动）
+#   uci set usbnic-tune.main.enabled='0'  # 总开关
+#   uci set usbnic-tune.main.sg='0'       # 不碰 SG
+#   uci set usbnic-tune.main.tsogso='1'   # 连 TSO/GSO 一起关（更稳、更耗 CPU）
+#   uci set usbnic-tune.main.flowctrl='1' # 关以太网 PAUSE 流控（默认不动）
 #   uci commit usbnic-tune
 #
 # 本脚本只在「驱动确实是 r8152 的网口」上动手，换驱动/换机型都不会误伤。
@@ -40,8 +60,6 @@ case "$DRV" in
 	*) exit 0 ;;
 esac
 
-[ -x /usr/sbin/ethtool ] || exit 0
-
 cfg() {
 	# cfg <option> <default>
 	v=$(uci -q get "usbnic-tune.main.$1" 2>/dev/null)
@@ -50,13 +68,32 @@ cfg() {
 
 [ "$(cfg enabled 1)" = "1" ] || exit 0
 
-if [ "$(cfg offload 1)" = "1" ]; then
-	# sg 是关键项：r8152 的 TX 聚合在 sg 打开时最容易卡死
-	/usr/sbin/ethtool -K "$INTERFACE" sg off tso off gso off 2>/dev/null && \
-		logger -t usbnic-tune "offload off on $INTERFACE (sg/tso/gso)"
+# --- SG：优先用驱动自己的开关，真正切到拷贝路径 ---
+if [ "$(cfg sg 1)" = "1" ]; then
+	SG_SYS="/sys/class/net/$INTERFACE/rtl_adv/sg_en"
+	if [ -w "$SG_SYS" ]; then
+		echo disable > "$SG_SYS" 2>/dev/null
+		if [ "$(cat "$SG_SYS" 2>/dev/null)" = "disable" ]; then
+			logger -t usbnic-tune "sg disabled on $INTERFACE (rtl_adv/sg_en)"
+		else
+			logger -t usbnic-tune "WARN: sg_en write failed on $INTERFACE"
+		fi
+	else
+		# 内树驱动的 TX 本来就是拷贝式，ethtool 足以让上层不再传 frags
+		[ -x /usr/sbin/ethtool ] && \
+			/usr/sbin/ethtool -K "$INTERFACE" sg off 2>/dev/null && \
+			logger -t usbnic-tune "sg off on $INTERFACE (ethtool, no rtl_adv)"
+	fi
 fi
 
-if [ "$(cfg flowctrl 0)" = "1" ]; then
+# --- TSO/GSO：默认保留（CPU 开销大头），需要更彻底时才关 ---
+if [ "$(cfg tsogso 0)" = "1" ] && [ -x /usr/sbin/ethtool ]; then
+	/usr/sbin/ethtool -K "$INTERFACE" tso off gso off 2>/dev/null && \
+		logger -t usbnic-tune "tso/gso off on $INTERFACE"
+fi
+
+# --- 可选：关以太网 PAUSE 流控（默认不动） ---
+if [ "$(cfg flowctrl 0)" = "1" ] && [ -x /usr/sbin/ethtool ]; then
 	/usr/sbin/ethtool -A "$INTERFACE" rx off tx off 2>/dev/null && \
 		logger -t usbnic-tune "flow control off on $INTERFACE"
 fi

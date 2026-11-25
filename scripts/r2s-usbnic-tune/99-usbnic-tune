@@ -6,7 +6,8 @@ touch /etc/config/usbnic-tune
 uci -q batch <<-'EOF'
 	set usbnic-tune.main=usbnic-tune
 	set usbnic-tune.main.enabled='1'
-	set usbnic-tune.main.offload='1'
+	set usbnic-tune.main.sg='1'
+	set usbnic-tune.main.tsogso='0'
 	set usbnic-tune.main.flowctrl='0'
 	commit usbnic-tune
 EOF
