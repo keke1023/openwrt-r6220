@@ -1,0 +1,200 @@
+name: Build R2S Mainline (r8152 driver validation)
+
+# =============================================================================
+# 目的：用 OpenWrt 官方主线（默认 v25.12.6 / kernel 6.12）编一版 NanoPi R2S，
+#      验证 Linux 6.12 内树 r8152 是否解决了 RTL8153B USB 网口卡死 / 掉总线问题。
+#
+# 为什么要另起一条线而不复用 build.yml：
+#   build.yml 是 immortalwrt 23.05（kernel 5.15.198）多机型矩阵，其 config 目录、
+#   第三方 feeds、diy-part2 里的所有注入都绑定 5.15 结构；主线 25.12 已切 apk、
+#   内核 6.12，混在一起只会让变量失控。验证实验要的是「最少的变量 + 最干净的基线」。
+#
+# 本 workflow 刻意【不】做任何驱动的额外调优：
+#   不加 sg_en 调优脚本、不加 usbnic-watch 守护、不换 vendor 驱动、不注入内核补丁。
+#   要看的就是「裸主线驱动自己撑不撑得住」。
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'OpenWrt 源码 ref（tag 或分支），默认 v25.12.6（kernel 6.12.112）'
+        required: false
+        default: 'v25.12.6'
+
+permissions:
+  contents: write
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  build-r2s-mainline:
+    name: Build r2s (openwrt mainline)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - name: 检出本仓库（拿 config-mainline/）
+        uses: actions/checkout@v4
+
+      - name: 清理磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost /usr/lib/jvm /usr/share/swift 2>/dev/null || true
+          sudo apt-get clean
+          df -hT / | tail -1
+
+      # apt 加固沿用 build.yml 的实测结论：裸 apt 可能无声卡满整个 job 上限
+      - name: 安装编译依赖
+        timeout-minutes: 40
+        run: |
+          APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::ForceIPv4=true"
+          PKGS="ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev jq python3-pyelftools"
+          sudo timeout 300 apt-get $APT_OPTS update || echo "!! apt-get update 部分失败，继续"
+          ok=0
+          for i in 1 2 3; do
+            echo "--- 依赖安装第 $i 次（上限 700s）---"
+            if sudo timeout 700 apt-get $APT_OPTS install -y $PKGS; then ok=1; break; fi
+            echo "!! 第 $i 次失败，20s 后重试"
+            sleep 20
+            sudo timeout 120 apt-get $APT_OPTS update || true
+          done
+          [ "$ok" = "1" ] || { echo "!! 依赖安装 3 次均失败"; exit 1; }
+          echo "OK：依赖就绪"
+
+      - name: 克隆 OpenWrt 官方主线
+        run: |
+          REF="${{ inputs.source_ref }}"
+          echo "==> 源码：openwrt/openwrt @ $REF"
+          git clone --depth 1 -b "$REF" https://github.com/openwrt/openwrt.git openwrt
+          cd openwrt
+          echo "==> commit: $(git log -1 --format='%H %s')"
+          echo "==> 内核版本：$(grep -E '^LINUX_KERNEL_VERSION' include/kernel-version.mk)"
+
+      # 早失败：设备被移除 / target 改名会让后面白跑一小时
+      - name: 预检 target 与设备定义
+        run: |
+          cd openwrt
+          echo "--- target/linux 下的架构 ---"
+          ls -1 target/linux/
+          test -d target/linux/rockchip/armv8 || { echo "!! rockchip/armv8 不存在"; exit 1; }
+          echo "--- rockchip 设备定义 ---"
+          ls -1 target/linux/rockchip/image/
+          grep -rn "nanopi-r2s" target/linux/rockchip/image/*.mk | head -5 \
+            || { echo "!! 未找到 nanopi-r2s 设备定义"; exit 1; }
+          grep -rn "friendlyarm,nanopi-r2s" target/linux/rockchip/ | head -3 || true
+
+      - name: 更新 feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 应用验证版 config
+        run: |
+          cd openwrt
+          cp ../config-mainline/friendlyarm_nanopi-r2s.config .config
+          make defconfig
+          echo "==================== 关键项校验 ===================="
+          grep -E "^CONFIG_TARGET_rockchip" .config
+          grep -E "CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r2s" .config || {
+            echo "!! 设备未被选中"; exit 1; }
+          grep -E "^CONFIG_PACKAGE_kmod-usb-net-rtl8152=" .config || {
+            echo "!! 内树 r8152 未选中"; exit 1; }
+          if grep -qE "^CONFIG_PACKAGE_kmod-usb-net-rtl8152-vendor=y" .config; then
+            echo "!! 意外选中 vendor 驱动，验证目标被污染"; exit 1
+          fi
+          grep -E "^CONFIG_PACKAGE_ethtool=" .config
+          echo "==================== 内核 ===================="
+          grep -E "^CONFIG_LINUX_6" .config || true
+
+      - name: 下载源码包
+        timeout-minutes: 60
+        run: |
+          cd openwrt
+          make download -j8 V=s || make download -j1 V=s || echo "!! 部分下载失败，交给编译阶段重试"
+
+      - name: 编译
+        id: compile
+        timeout-minutes: 300
+        run: |
+          cd openwrt
+          set -o pipefail
+          if make -j$(nproc) V=s 2>&1 | tail -200; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "OK：编译成功"
+          else
+            echo "!! -j 并行编译失败，转单线程定位"
+            echo "status=failed" >> $GITHUB_OUTPUT
+            make -j1 V=s 2>&1 | tail -200 || true
+            exit 1
+          fi
+
+      # 验证的核心：确认编译用的 r8152.c 真的带主线那组健壮性修复
+      - name: 校验内树 r8152 源码含主线修复
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          cd openwrt
+          F=$(find build_dir -path "*/drivers/net/usb/r8152.c" 2>/dev/null | head -1)
+          echo "r8152.c 路径: $F"
+          [ -n "$F" ] || { echo "!! 找不到编译用的 r8152.c"; exit 1; }
+          for sym in REGISTER_ACCESS_MAX_RESETS rtl_set_inaccessible r8152_control_msg netif_trans_update; do
+            n=$(grep -c "$sym" "$F" || true)
+            echo "  $sym : $n 处"
+            [ "$n" -gt 0 ] || { echo "!! 缺少主线修复符号 $sym"; exit 1; }
+          done
+          echo "OK：主线健壮性修复全部存在"
+
+      - name: 校验产物与 manifest
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          cd openwrt
+          echo "--- 产物 ---"
+          ls -lh bin/targets/rockchip/armv8/
+          M=$(ls bin/targets/rockchip/armv8/*.manifest | head -1)
+          echo "--- manifest 中 r8152 / usb-net / ethtool ---"
+          grep -E "r8152|usb-net|ethtool" "$M" || true
+          grep -q "kmod-usb-net-rtl8152" "$M" || { echo "!! manifest 缺内树 r8152"; exit 1; }
+          if grep -q "kmod-usb-net-rtl8152-vendor" "$M"; then
+            echo "!! manifest 出现了 vendor 包"; exit 1
+          fi
+          echo "--- 内核版本 ---"
+          grep -E "KERNEL" bin/targets/rockchip/armv8/profiles.json | head -3 || true
+
+      - name: 整理固件
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          cd openwrt/bin/targets/rockchip/armv8
+          rm -rf packages
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+
+      - name: 生成标签
+        id: tag
+        if: steps.compile.outputs.status == 'success'
+        run: echo "release_tag=r2s-mainline-$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_OUTPUT
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        if: steps.compile.outputs.status == 'success'
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: ${{ steps.tag.outputs.release_tag }}
+          body: |
+            NanoPi R2S —— OpenWrt 官方主线 ${{ inputs.source_ref }}（kernel 6.12）验证版
+
+            验证目标：Linux 6.12 内树 r8152 是否解决 RTL8153B USB 网口卡死 / 掉总线。
+            内树驱动，未做任何 offload 调优，未加守护脚本。
+
+            刷机后验收：
+            - `ethtool -i eth1 | grep version`
+            - `uname -r`（期望 6.12.x）
+            - `logread | grep -c "Tx timeout"`（期望 0）
+          files: ${{ env.FIRMWARE }}/*
+
+      - name: 上传 Artifact（失败也留半成品排错）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r2s-mainline-${{ inputs.source_ref }}
+          path: openwrt/bin/targets/**/*
+          retention-days: 7
