@@ -1,0 +1,13 @@
+#!/bin/sh
+# 首启生成 /etc/config/usbnic-tune（幂等；已存在则不覆盖用户改过的值）
+[ -f /etc/config/usbnic-tune ] && exit 0
+
+touch /etc/config/usbnic-tune
+uci -q batch <<-'EOF'
+	set usbnic-tune.main=usbnic-tune
+	set usbnic-tune.main.enabled='1'
+	set usbnic-tune.main.offload='1'
+	set usbnic-tune.main.flowctrl='0'
+	commit usbnic-tune
+EOF
+exit 0

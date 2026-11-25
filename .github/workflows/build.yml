@@ -569,6 +569,26 @@ jobs:
             echo "OK：E8821 无线栈唯一（ath10k-ct-smallbuffers + qca988x-ct + ath9k + wpad-basic-openssl）"
           fi
 
+          # ---- 校验 N-3：R2S 的 USB 网口驱动必须换成 Realtek 官方 2.20.1 ----
+          # 内核树内 r8152 是 v1.12.13（2021 年），TX 聚合在 sg/TSO 打开时大流量会卡死；
+          # 而 rtl8152_tx_timeout() 全文件唯一动作就是 usb_queue_reset_device()，这颗
+          # RTL8153B 对 USB 复位耐受很差 —— 实机第二次复位就 SET_ADDRESS 超时(-71)、
+          # 彻底掉总线，只能断电。官方 2.20.1 走固定 4 个 agg URB 的另一套 TX 通路，
+          # 且内嵌 usb_patch_code_20190906（等价 2019-10-23 的 v1 patch code）。
+          # 两个包 CONFLICTS：若 kconfig 把两个都留下，要么打包期文件冲突，要么装错驱动
+          # （能开机、跑几小时才断，最难查的假成功），必须显式卡死。
+          if echo "${{ matrix.config }}" | grep -qE '^friendlyarm_nanopi-r2s\.config$'; then
+            grep -qE "^CONFIG_PACKAGE_kmod-usb-net-rtl8152-vendor=y$" /tmp/resolved.config \
+              || { echo "!! 失败：R2S 期望 kmod-usb-net-rtl8152-vendor=y，kconfig 解析后没有"; exit 1; }
+            if grep -qE "^CONFIG_PACKAGE_kmod-usb-net-rtl8152=[ym]$" /tmp/resolved.config; then
+              echo "!! 失败：R2S 不应再选中内核树内 kmod-usb-net-rtl8152（与 -vendor CONFLICTS）"
+              exit 1
+            fi
+            grep -qE "^CONFIG_PACKAGE_ethtool=y$" /tmp/resolved.config \
+              || { echo "!! 失败：R2S 需要 ethtool（/etc/hotplug.d/net/25-usbnic-tune 依赖它）"; exit 1; }
+            echo "OK：R2S USB 网口驱动 = kmod-usb-net-rtl8152-vendor（官方 2.20.1）+ ethtool"
+          fi
+
           # ---- 校验 N：squashfs 块大小（2026-11-01 新增的零功能代价瘦身项）----
           # k2p.config 里显式写了 CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=1024（默认是 256）。
           # 块越大 xz 压缩字典越大，镜像普遍小 3~8%。这里硬校验，防止 kconfig 把它
@@ -844,6 +864,19 @@ jobs:
                      wpad-basic-openssl swconfig luci-app-autoreboot kmod-zram; do
               grep -q "^$p " "$MAN" || MISSING="$MISSING $p"
             done
+          fi
+          if echo "${{ matrix.config }}" | grep -qE '^friendlyarm_nanopi-r2s\.config$'; then
+            # R2S：USB 网口必须是 Realtek 官方 2.20.1（-vendor），内核树内那个必须不在。
+            # ethtool 必须在位：/etc/hotplug.d/net/25-usbnic-tune 靠它关 sg/tso/gso；
+            # 缺 ethtool 时脚本会静默跳过 → 看起来改好了其实没生效，属假成功。
+            for p in kmod-usb-net-rtl8152-vendor ethtool r8152-firmware; do
+              grep -q "^$p " "$MAN" || MISSING="$MISSING $p"
+            done
+            if grep -q "^kmod-usb-net-rtl8152 " "$MAN"; then
+              echo "!! 失败：manifest 里同时有内核树内 kmod-usb-net-rtl8152 与 -vendor"
+              echo "   （两者 CONFLICTS，装错驱动会表现为「能开机、跑几小时才断」）"
+              exit 1
+            fi
           fi
           if [ -n "$MISSING" ]; then
             echo "!! 失败：manifest 缺少核心包:$MISSING"

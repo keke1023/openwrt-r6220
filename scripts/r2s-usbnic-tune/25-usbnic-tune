@@ -1,0 +1,64 @@
+#!/bin/sh
+# /etc/hotplug.d/net/25-usbnic-tune
+#
+# NanoPi R2S 的 eth1 是 USB3 上的 RTL8153B（0bda:8153）。这颗芯片在 r8152 驱动
+# 开启 Scatter/Gather + TSO 的情况下，大流量时会进入「发送队列卡死」：
+#   NETDEV WATCHDOG: eth1 (r8152): transmit queue 0 timed out
+#   r8152 4-1:1.0 eth1: Tx timeout  →  usb_queue_reset_device()  →  芯片复位
+# 而 rtl8152_tx_timeout() 是驱动里唯一会做 USB 端口复位的地方，这颗芯片经常扛不住
+# 那次复位（SET_ADDRESS 超时 / error -71 / Cannot enable），一掉总线就只能断电。
+#
+# 所以这里在网口就绪时把 offload 关掉，从源头降低触发概率。社区在 R2S / 同类
+# RTL8153 软路由上有大量一致反馈：sg off 后大流量 tx timeout 基本不再出现。
+#
+# 配置：/etc/config/usbnic-tune
+#   uci set usbnic-tune.main.offload='0'   # 想拿回吞吐就关掉本脚本的作用
+#   uci set usbnic-tune.main.flowctrl='1'  # 关以太网 PAUSE 流控（默认不动）
+#   uci commit usbnic-tune
+#
+# 本脚本只在「驱动确实是 r8152 的网口」上动手，换驱动/换机型都不会误伤。
+
+[ -n "$INTERFACE" ] || exit 0
+
+case "$ACTION" in
+	add|ifup|register) ;;
+	*) exit 0 ;;
+esac
+
+# 等网口 sysfs 就绪（热插拔事件可能早于 netdev 注册完成）
+i=0
+while [ ! -e "/sys/class/net/$INTERFACE" ] && [ $i -lt 20 ]; do
+	i=$((i + 1))
+	sleep 0.1 2>/dev/null || sleep 1
+done
+[ -e "/sys/class/net/$INTERFACE" ] || exit 0
+
+# 按驱动名判定，不硬编码 eth1
+DRV=$(readlink -f "/sys/class/net/$INTERFACE/device/driver" 2>/dev/null)
+case "$DRV" in
+	*/r8152) ;;
+	*) exit 0 ;;
+esac
+
+[ -x /usr/sbin/ethtool ] || exit 0
+
+cfg() {
+	# cfg <option> <default>
+	v=$(uci -q get "usbnic-tune.main.$1" 2>/dev/null)
+	[ -n "$v" ] && echo "$v" || echo "$2"
+}
+
+[ "$(cfg enabled 1)" = "1" ] || exit 0
+
+if [ "$(cfg offload 1)" = "1" ]; then
+	# sg 是关键项：r8152 的 TX 聚合在 sg 打开时最容易卡死
+	/usr/sbin/ethtool -K "$INTERFACE" sg off tso off gso off 2>/dev/null && \
+		logger -t usbnic-tune "offload off on $INTERFACE (sg/tso/gso)"
+fi
+
+if [ "$(cfg flowctrl 0)" = "1" ]; then
+	/usr/sbin/ethtool -A "$INTERFACE" rx off tx off 2>/dev/null && \
+		logger -t usbnic-tune "flow control off on $INTERFACE"
+fi
+
+exit 0

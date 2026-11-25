@@ -1785,3 +1785,52 @@ if echo "${TARGET_CONFIG:-}" | grep -qE '^friendlyarm_nanopi-r2s\.config$'; then
 else
   echo "==> [28] 非 R2S 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 r8152 补丁"
 fi
+
+# 29) NanoPi R2S：USB 网口 offload 调优（从源头降低 r8152 TX 卡死概率）
+#     实机现场（2026-11-25 08:01，uptime 9267s）把链条走完了：
+#       9267.5 NETDEV WATCHDOG transmit queue 0 timed out（前 5s 没有任何 USB 错误）
+#       9267.5 xhci bad transfer trb length 16761596 in event trb  ×2（完成描述符已不可信）
+#       9267.5 Tx status -2 ×4（URB 被 unlink）
+#       9269.7 reset SuperSpeed USB device number 2 —— 这次复位成功，恢复了 243s
+#       9512~  Tx timeout 再次刷屏 → 9544 第二次复位 → SET_ADDRESS 超时 → error -71
+#       9552~ Cannot enable ×5 → USB disconnect → attempt power cycle（板上无 VBUS，空转）
+#     结论：① 990 的 netif_trans_update 没能阻止这一次——所以这次是**真卡死**，
+#           不是纯假告警；② 真正致命的不是卡死本身，而是 tx_timeout 里那个
+#           usb_queue_reset_device()：这颗芯片对 USB 复位耐受很差，第二次就再也
+#           枚举不回来（守护脚本三级恢复全失败也印证了这一点）。
+#     社区在 R2S / RTL8153 软路由上的一致经验：sg 打开时 r8152 的 TX 聚合在大流量
+#     下最易卡死，sg off 后基本不再复现。故随固件带 hotplug 调优：
+#       /etc/hotplug.d/net/25-usbnic-tune  按驱动名匹配 r8152 网口，
+#         sg off + tso off + gso off（默认开），可选关 PAUSE 流控（默认不动）
+#       /etc/uci-defaults/99-usbnic-tune   首启生成 /etc/config/usbnic-tune
+#     想拿回吞吐：uci set usbnic-tune.main.offload='0' && uci commit usbnic-tune
+if echo "${TARGET_CONFIG:-}" | grep -qE '^friendlyarm_nanopi-r2s\.config$'; then
+  echo "==> [29] NanoPi R2S：USB 网口 offload 调优注入"
+  TUNE_SRC="../scripts/r2s-usbnic-tune"
+  for f in 25-usbnic-tune 99-usbnic-tune; do
+    if [ ! -f "$TUNE_SRC/$f" ]; then
+      echo "  !! 错误：缺少 $TUNE_SRC/$f"; exit 1
+    fi
+  done
+  mkdir -p files/etc/hotplug.d/net files/etc/uci-defaults
+  cp -f "$TUNE_SRC/25-usbnic-tune"    files/etc/hotplug.d/net/25-usbnic-tune
+  cp -f "$TUNE_SRC/99-usbnic-tune"    files/etc/uci-defaults/99-usbnic-tune
+  chmod 755 files/etc/hotplug.d/net/25-usbnic-tune files/etc/uci-defaults/99-usbnic-tune
+
+  for f in files/etc/hotplug.d/net/25-usbnic-tune files/etc/uci-defaults/99-usbnic-tune; do
+    if ! sh -n "$f" 2>/dev/null; then
+      echo "  !! 错误：$f 语法不通过"; exit 1
+    fi
+  done
+  # 关键实现自检：必须按驱动名匹配、必须真的关 sg、必须可 uci 关掉
+  for k in '/sys/class/net/$INTERFACE/device/driver' '*/r8152)' 'sg off' 'usbnic-tune.main.'; do
+    if ! grep -qF "$k" files/etc/hotplug.d/net/25-usbnic-tune; then
+      echo "  !! 错误：25-usbnic-tune 缺少关键实现 '$k'"; exit 1
+    fi
+  done
+  ls -l files/etc/hotplug.d/net/25-usbnic-tune files/etc/uci-defaults/99-usbnic-tune | sed 's/^/     /'
+  echo "  ethtool 在本镜像内由 config 的 CONFIG_PACKAGE_ethtool=y 提供（脚本已在无 ethtool 时安全退出）"
+  echo "==> [29] R2S USB 网口 offload 调优注入完成"
+else
+  echo "==> [29] 非 R2S 机型（TARGET_CONFIG='${TARGET_CONFIG:-}'），跳过 offload 调优"
+fi
