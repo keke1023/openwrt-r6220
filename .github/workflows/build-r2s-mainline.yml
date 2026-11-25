@@ -90,23 +90,110 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+      # ---------------------------------------------------------------------
+      # luci-app-ssr-plus：按 helloworld 官方 README 的 Method 1，直接 clone 到
+      # package/helloworld（package/ 优先级高于 feeds/，100% 确定收录 helloworld 版）。
+      #
+      # 两个必做的收尾动作：
+      #   1) 剥离 shadowsocks-rust —— aarch64 下 LUCI_DEPENDS 会通过条件依赖把
+      #      Rust 工具链拽进来（rustc 1.88，编译极慢且易失败），而 xray 已覆盖
+      #      日常主力场景。直接删掉所有含 shadowsocks-rust 的依赖行。
+      #   2) 删除官方 packages 源里与 helloworld 同名的包 —— 25.12 的
+      #      net/{xray-core,v2ray-core,v2raya,microsocks} 全部与 helloworld 重名，
+      #      留着会构成 duplicate package，最终装进去的是哪一份不可控。
+      #      ssr-plus 要的是 helloworld 那套（版本串与 gen_config.lua 逻辑配套）。
+      # ---------------------------------------------------------------------
+      - name: 添加 helloworld 源（luci-app-ssr-plus）
+        run: |
+          cd openwrt
+          HELLO_SHA=2abdc9aa9e19607774dc9789709212b70b8607c6
+          rm -rf package/helloworld
+          git clone https://github.com/fw876/helloworld.git package/helloworld
+          git -C package/helloworld checkout -q "$HELLO_SHA"
+          echo "==> helloworld @ $(git -C package/helloworld log -1 --format='%h %ad %s' --date=short)"
+          test -d package/helloworld/luci-app-ssr-plus || { echo "!! clone 后没有 luci-app-ssr-plus"; exit 1; }
+          grep -m1 '^PKG_VERSION:=' package/helloworld/luci-app-ssr-plus/Makefile
+          grep -m1 '^PKG_VERSION:=' package/helloworld/xray-core/Makefile
+
+          SSRP_MK=package/helloworld/luci-app-ssr-plus/Makefile
+          sed -i '/shadowsocks-rust/d' "$SSRP_MK"
+          if grep -q 'shadowsocks-rust' "$SSRP_MK"; then
+            echo "!! shadowsocks-rust 未剥离干净"; exit 1
+          fi
+          echo "OK：shadowsocks-rust 已剥离"
+
+          for p in xray-core v2ray-core v2raya microsocks; do
+            if [ -d "package/feeds/packages/$p" ]; then
+              rm -rf "package/feeds/packages/$p"
+              echo "已移除重名 feeds 包：$p"
+            fi
+          done
+          echo "==> package/helloworld 内包目录："
+          ls -1 package/helloworld | tr '\n' ' '; echo
+
+      # ---------------------------------------------------------------------
+      # LAN/WAN 对调：保持与 23.05 正式版一致的接线习惯
+      #
+      # 友善官方定义：eth0 = 板载原生 GMAC（WAN），eth1 = USB3 转网口（LAN）
+      # 但本仓库正式固件在 scripts/diy-part2.sh 里已把 R2S 改成 lan=eth0 / wan=eth1
+      # （即 USB 网口做 WAN），用户接线基于此。
+      # 本 workflow 不带 diy-part2.sh，若不补这一步，刷完 LAN/WAN 会与现状相反。
+      # ---------------------------------------------------------------------
+      - name: 对调 R2S 的 LAN/WAN（与正式版一致）
+        run: |
+          cd openwrt
+          N2=target/linux/rockchip/armv8/base-files/etc/board.d/02_network
+          test -f "$N2" || { echo "!! 找不到 02_network"; exit 1; }
+          echo "--- 改前 ---"
+          grep -n "nanopi-r2s" "$N2" || true
+          python3 "${{ github.workspace }}/scripts/diy-r2s-lanwan.py" "$N2"
+          echo "--- 改后 ---"
+          grep -n "nanopi-r2s" "$N2"
+          grep -A1 "friendlyarm,nanopi-r2s)" "$N2" \
+            | grep -q "ucidef_set_interfaces_lan_wan 'eth0' 'eth1'" \
+            || { echo "!! LAN/WAN 对调未生效"; exit 1; }
+          echo "OK：r2s lan=eth0(原生) wan=eth1(USB)"
+
       - name: 应用验证版 config
         run: |
           cd openwrt
           cp ../config-mainline/friendlyarm_nanopi-r2s.config .config
-          make defconfig
-          echo "==================== 关键项校验 ===================="
+          make defconfig 2>&1 | tee /tmp/defconfig.log
+          echo "==================== 重名包检查 ===================="
+          if grep -iE "duplicate package|is defined twice" /tmp/defconfig.log; then
+            echo "!! 存在重名包定义（feeds 与 helloworld 冲突）"; exit 1
+          fi
+          echo "OK：无重名包"
+          echo "==================== target ===================="
           grep -E "^CONFIG_TARGET_rockchip" .config
           grep -E "CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r2s" .config || {
             echo "!! 设备未被选中"; exit 1; }
+          echo "==================== 驱动（验证目标）===================="
           grep -E "^CONFIG_PACKAGE_kmod-usb-net-rtl8152=" .config || {
             echo "!! 内树 r8152 未选中"; exit 1; }
           if grep -qE "^CONFIG_PACKAGE_kmod-usb-net-rtl8152-vendor=y" .config; then
             echo "!! 意外选中 vendor 驱动，验证目标被污染"; exit 1
           fi
           grep -E "^CONFIG_PACKAGE_ethtool=" .config
+          echo "==================== ssr-plus ===================="
+          grep -E "^CONFIG_PACKAGE_luci-app-ssr-plus" .config
+          grep -qE "^CONFIG_PACKAGE_luci-app-ssr-plus=y" .config || {
+            echo "!! ssr-plus 未被选中"; exit 1; }
+          grep -qE "^CONFIG_PACKAGE_luci-compat=y" .config || {
+            echo "!! luci-compat 未选中 —— CBI 会缺失，ssr-plus 页面全废"; exit 1; }
+          grep -qE "^CONFIG_PACKAGE_luci-lua-runtime=y" .config || {
+            echo "!! luci-lua-runtime 未选中"; exit 1; }
+          grep -qE "^CONFIG_PACKAGE_xray-core=y" .config || {
+            echo "!! xray-core 未选中"; exit 1; }
+          grep -qE "^CONFIG_PACKAGE_luci-app-ssr-plus_Nftables_Transparent_Proxy=y" .config || {
+            echo "!! 透明代理后端不是 nftables（25.12 是 firewall4，必须 nft）"; exit 1; }
+          if grep -qE "^CONFIG_PACKAGE_shadowsocks-rust" .config; then
+            echo "!! 意外引入 shadowsocks-rust（Rust 工具链）"; exit 1
+          fi
+          echo "OK：ssr-plus + xray + luci-compat 齐备，透明代理走 nftables"
           echo "==================== 内核 ===================="
           grep -E "^CONFIG_LINUX_6" .config || true
+
 
       - name: 下载源码包
         timeout-minutes: 60
@@ -158,6 +245,17 @@ jobs:
           if grep -q "kmod-usb-net-rtl8152-vendor" "$M"; then
             echo "!! manifest 出现了 vendor 包"; exit 1
           fi
+          echo "--- manifest 中 ssr-plus 相关 ---"
+          grep -iE "ssr-plus|xray|luci-compat|lua-runtime|dnsmasq" "$M" || true
+          for p in luci-app-ssr-plus xray-core luci-compat luci-lua-runtime dnsmasq-full; do
+            if ! grep -q "^$p " "$M"; then
+              echo "!! manifest 缺 $p"; exit 1
+            fi
+          done
+          if grep -q "^shadowsocks-rust" "$M"; then
+            echo "!! manifest 出现 shadowsocks-rust（Rust 未剥离）"; exit 1
+          fi
+          echo "OK：ssr-plus 全家与内树 r8152 同时就位，无 Rust、无 vendor"
           echo "--- 内核版本 ---"
           grep -E "KERNEL" bin/targets/rockchip/armv8/profiles.json | head -3 || true
 
@@ -186,9 +284,16 @@ jobs:
             内树驱动，未做任何 offload 调优，未加守护脚本。
 
             刷机后验收：
-            - `ethtool -i eth1 | grep version`
             - `uname -r`（期望 6.12.x）
+            - `ethtool -i eth1 | grep version`（期望内核内树驱动，非 v2.20.1）
             - `logread | grep -c "Tx timeout"`（期望 0）
+
+            已包含 luci-app-ssr-plus（fw876/helloworld master）+ xray-core，
+            透明代理走 nftables；另装 luci-compat（Lua CBI 运行时，缺它 ssr-plus 页面全废）。
+            未装 shadowsocks-rust（已剥离）。LAN/WAN 已对调：lan=eth0(原生) / wan=eth1(USB)，
+            与 23.05 正式版一致。刷完可用下面两条确认 ssr-plus 与网口：
+            - `ls /usr/lib/lua/luci/cbi.lua`
+            - `ubus call network.interface.wan status | grep device`（期望 eth1）
           files: ${{ env.FIRMWARE }}/*
 
       - name: 上传 Artifact（失败也留半成品排错）
