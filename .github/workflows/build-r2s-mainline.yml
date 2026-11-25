@@ -142,17 +142,30 @@ jobs:
       - name: 对调 R2S 的 LAN/WAN（与正式版一致）
         run: |
           cd openwrt
+          SCRIPT="${{ github.workspace }}/scripts/diy-r2s-lanwan.py"
+          if [ ! -f "$SCRIPT" ]; then
+            echo "!! 脚本不存在：$SCRIPT"
+            echo "   该文件必须与本 workflow 一起提交在仓库里（曾漏推导致本步骤失败）"
+            exit 1
+          fi
           N2=target/linux/rockchip/armv8/base-files/etc/board.d/02_network
           test -f "$N2" || { echo "!! 找不到 02_network"; exit 1; }
           echo "--- 改前 ---"
           grep -n "nanopi-r2s" "$N2" || true
-          python3 "${{ github.workspace }}/scripts/diy-r2s-lanwan.py" "$N2"
+          python3 "$SCRIPT" "$N2"
           echo "--- 改后 ---"
           grep -n "nanopi-r2s" "$N2"
+          # r2s 独立分支必须落在 rockchip_setup_interfaces 内，且 lan=eth0 / wan=eth1
           grep -A1 "friendlyarm,nanopi-r2s)" "$N2" \
             | grep -q "ucidef_set_interfaces_lan_wan 'eth0' 'eth1'" \
             || { echo "!! LAN/WAN 对调未生效"; exit 1; }
-          echo "OK：r2s lan=eth0(原生) wan=eth1(USB)"
+          # 共享列表里的 r2s 行必须已摘掉：改前 2 处（interfaces + macs），改后只剩 macs 1 处
+          n=$(grep -c "friendlyarm,nanopi-r2s|" "$N2" || true)
+          [ "$n" = "1" ] || { echo "!! 共享行数量异常（$n，期望 1，只剩 setup_macs 那处）"; exit 1; }
+          # r2s-plus 绝不能被误删（宽松正则的历史坑）
+          grep -q "friendlyarm,nanopi-r2s-plus|" "$N2" \
+            || { echo "!! r2s-plus 的网口配置被误删"; exit 1; }
+          echo "OK：r2s lan=eth0(原生) wan=eth1(USB)；r2s-plus 与 macs 块未受影响"
 
       - name: 应用验证版 config
         run: |
